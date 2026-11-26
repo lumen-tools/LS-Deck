@@ -239,7 +239,7 @@ class Store:
                 continue
             raw_profile = g.get("profile")
             if isinstance(raw_profile, dict) and "limit" not in raw_profile and raw_profile.get("flow_scale") == 80:
-                # 1.0.0 started Flow Scale at 80 %: move untouched profiles to the new default
+                # the test build before 1.0.0 started Flow Scale at 80 %: move untouched profiles to 100 %
                 raw_profile = {**raw_profile, "flow_scale": DEFAULT_PROFILE["flow_scale"]}
             games[str(appid)] = {
                 "name": str(g.get("name") or "")[:200],
