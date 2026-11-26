@@ -211,8 +211,9 @@ def profile_to_toml(appid: str, game: dict) -> str:
         "adaptive_auto_base_fps_cap = true",
         f"flow_scale = {p['flow_scale'] / 100:.2f}",
         f"performance_mode = {'true' if p['performance'] else 'false'}",
-        # Adaptive caps the real frames itself (above)
-        f"base_fps_cap = {0 if adaptive else p['limit']}",
+        # Fixed: the plugin's limit. Adaptive keeps real frames steady under the target itself, but lets
+        # a game run above it: capped at the target, no more frames reach the screen than it shows.
+        f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
         "scaling_enabled = false",
     ]
     return "\n".join(lines) + "\n"
