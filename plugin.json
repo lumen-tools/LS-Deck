@@ -1,0 +1,15 @@
+{
+  "name": "LS Deck",
+  "author": "lumen-tools",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "frame-generation",
+      "lossless-scaling",
+      "performance"
+    ],
+    "description": "Lossless Scaling frame generation (LSFG 3.1) on the Steam Deck, with a per-game toggle, live status and Lossless Scaling's frame generation settings. Uses your own copy of Lossless Scaling; built on the MAKO Renderer layer. Not affiliated with Lossless Scaling (THS), MAKO or Valve.",
+    "image": ""
+  }
+}
