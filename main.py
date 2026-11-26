@@ -76,11 +76,14 @@ DEFAULT_PROFILE = {
     "mode": "fixed",          # Mode: Fixed / Adaptive
     "multiplier": 2,          # Multiplier (Fixed)
     "target": REFRESH,        # Target (Adaptive): the screen's refresh rate
-    "flow_scale": 80,         # Flow Scale in percent
+    "flow_scale": 100,        # Flow Scale in percent: full at the Deck's 800p
     "performance": True,      # Performance: the lighter LSFG model, recommended on the Deck's GPU
+    # Fixed mode: limit for the game's real frames (0 = off). Steam's limit acts after frame
+    # generation, so on a screen without VRR this keeps base x multiplier at the refresh rate.
+    "limit": REFRESH // 2,
 }
 CHOICES = {"mode": ("fixed", "adaptive")}
-INTS = {"multiplier": (2, 4), "target": (30, 240), "flow_scale": (25, 100)}
+INTS = {"multiplier": (2, 4), "target": (30, 240), "flow_scale": (25, 100), "limit": (0, 240)}
 BOOLS = ("performance",)
 
 
@@ -125,7 +128,8 @@ def sanitize_profile(raw) -> dict:
     for key, (lo, hi) in INTS.items():
         val = raw.get(key)
         if isinstance(val, (int, float)) and not isinstance(val, bool):
-            out[key] = max(lo, min(hi, int(round(val))))
+            val = int(round(val))
+            out[key] = 0 if key == "limit" and val <= 0 else max(lo if key != "limit" else 10, min(hi, val))
     for key in BOOLS:
         if isinstance(raw.get(key), bool):
             out[key] = raw[key]
@@ -203,10 +207,14 @@ def profile_to_toml(appid: str, game: dict) -> str:
         f"target_fps = {p['target']}",
         # Lossless Scaling's Adaptive has no ceiling to set; MAKO's default
         "adaptive_max_multiplier = 3",
-        # MAKO Decky's default: holds the real frames steady under the target
-        "adaptive_auto_base_fps_cap = true",
+        # as in Lossless Scaling, Adaptive leaves the game's frame rate alone (MAKO's Steady Base Cap off)
+        "adaptive_auto_base_fps_cap = false",
         f"flow_scale = {p['flow_scale'] / 100:.2f}",
         f"performance_mode = {'true' if p['performance'] else 'false'}",
+        # Fixed: the plugin's limit. Adaptive: the target. Below it the game runs free, as in Lossless
+        # Scaling; above it, where Lossless Scaling's capture skips the extra frames on Windows, the
+        # layer sits in the game's own presents, so the game is held at the target instead of queuing.
+        f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
         "scaling_enabled = false",
     ]
     return "\n".join(lines) + "\n"
@@ -229,10 +237,14 @@ class Store:
         for appid, g in (raw.get("games") or {}).items():
             if not str(appid).isdigit() or not isinstance(g, dict):
                 continue
+            raw_profile = g.get("profile")
+            if isinstance(raw_profile, dict) and "limit" not in raw_profile and raw_profile.get("flow_scale") == 80:
+                # the test build before 1.0.0 started Flow Scale at 80 %: move untouched profiles to 100 %
+                raw_profile = {**raw_profile, "flow_scale": DEFAULT_PROFILE["flow_scale"]}
             games[str(appid)] = {
                 "name": str(g.get("name") or "")[:200],
                 "enabled": bool(g.get("enabled", True)),
-                "profile": sanitize_profile(g.get("profile")),
+                "profile": sanitize_profile(raw_profile),
             }
         self.data["games"] = games
 
@@ -307,6 +319,9 @@ export MAKO_PROFILE_FALLBACK="$appid"
 export MAKO_PRESENT_ACQUIRE_TIMEOUT_MS="${MAKO_PRESENT_ACQUIRE_TIMEOUT_MS:-50}"
 # never two frame generators in one game: Decky Smooth Frames' layer (and afmf-linux) stay out
 export SMOOTH_FRAMES_DISABLE=1 DISABLE_AFMF=1
+# MAKO's per-second frame statistics for the live status; only slow presents above 250 ms are logged
+export MAKO_PRESENT_DIAGNOSTICS="${MAKO_PRESENT_DIAGNOSTICS:-1}"
+export MAKO_PRESENT_DIAGNOSTICS_THRESHOLD_MS="${MAKO_PRESENT_DIAGNOSTICS_THRESHOLD_MS:-250}"
 # MAKO logs to stderr; a plain file (no pipe) cannot stall the game
 : > "$STATUS_DIR/$appid.log" 2>/dev/null && exec 2>>"$STATUS_DIR/$appid.log"
 exec "$LAUNCHER" "$@"
@@ -453,22 +468,57 @@ def _runtime_records(appid: str, since: int):
     return mine or unattributed
 
 
-def _problem_from_log(appid: str):
+APP_PRESENT_RE = re.compile(
+    r"operation=application-queue-present .*?pid=(\d+) .*?sample_end_monotonic_ms=(\d+) .*?calls=(\d+) "
+    r".*?entry_interval_mean_ms=([\d.]+)"
+)
+PLAN_RE = re.compile(r"operation=adaptive-plan .*?base_fps=([\d.]+) target_fps=([\d.]+) generated=(\d+)")
+PROBLEM_RE = re.compile(r"MAKO.*\b(error|failed|unavailable)\b", re.I)
+TAIL_BYTES = 128 * 1024
+
+
+def _log_path(appid: str) -> str:
+    return os.path.join(STATUS_DIR, appid + ".log")
+
+
+def trim_log(appid: str):
+    """The wrapper opened the log with O_APPEND: truncating lets the game write on at the new start."""
     try:
-        size = os.path.getsize(os.path.join(STATUS_DIR, appid + ".log"))
-        if size > STATUS_LOG_MAX:
-            os.truncate(os.path.join(STATUS_DIR, appid + ".log"), 0)
-            return None
-        with open(os.path.join(STATUS_DIR, appid + ".log"), "rb") as fh:
-            fh.seek(max(0, size - 64 * 1024))
+        if os.path.getsize(_log_path(appid)) > STATUS_LOG_MAX:
+            os.truncate(_log_path(appid), 0)
+    except OSError:
+        pass
+
+
+def _read_log(appid: str) -> dict:
+    """Last problem line, the game's own present rate and the last adaptive plan from MAKO's log."""
+    trim_log(appid)
+    try:
+        path = _log_path(appid)
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - TAIL_BYTES))
             text = fh.read().decode("utf-8", errors="replace")
     except OSError:
-        return None
-    last = None
+        return {}
+    out, presents = {}, {}
     for line in text.splitlines():
-        if "MAKO" in line and re.search(r"\b(error|failed|unavailable)\b", line, re.I):
-            last = line.strip()[:240]
-    return last
+        m = APP_PRESENT_RE.search(line)
+        if m:
+            # one line per second and swapchain; the game's swapchain is the busiest one
+            presents[m.group(1)] = (int(m.group(2)), int(m.group(3)), float(m.group(4)))
+            continue
+        m = PLAN_RE.search(line)
+        if m:
+            out["plan"] = (float(m.group(1)), float(m.group(2)), int(m.group(3)))
+            continue
+        if PROBLEM_RE.search(line) and "present diagnostics" not in line:
+            out["problem"] = line.strip()[:240]
+    if presents:
+        end_ms, calls, interval = max(presents.values(), key=lambda v: (v[1], v[0]))
+        out["real_fps"] = round(1000.0 / interval) if interval > 0 else 0
+        out["stats_age"] = time.monotonic() - end_ms / 1000.0
+    return out
 
 
 def live_status(appid: str) -> dict:
@@ -483,7 +533,7 @@ def live_status(appid: str) -> dict:
     if not records:
         if age < 30:
             return {**base, "state": "starting"}
-        return {**base, "state": "not_loaded", "problem": _problem_from_log(appid)}
+        return {**base, "state": "not_loaded", "problem": _read_log(appid).get("problem")}
     # the swapchain that generates frames, else the most recent one
     records.sort(key=lambda r: (bool(r.get("frame_generation_active")), r.get("updated_unix_ms", 0)))
     rec = records[-1]
@@ -511,6 +561,17 @@ def live_status(appid: str) -> dict:
     if not requested.get("frame_generation_enabled", profile.get("frame_generation_enabled", True)):
         return {**out, "state": "live_off"}
     if rec.get("frame_generation_active"):
+        log = _read_log(appid)
+        real = log.get("real_fps")
+        if real is not None:
+            if log.get("stats_age", 0) > 5:
+                return {**out, "state": "stale"}
+            out["real_fps"] = real
+            if out["adaptive"] and log.get("plan"):
+                base_fps, _target, generated = log["plan"]
+                out["output_fps"] = min(round(base_fps * (1 + generated)), int(out["target"] or 1000))
+            elif not out["adaptive"] and isinstance(out["multiplier"], int):
+                out["output_fps"] = real * out["multiplier"]
         return {**out, "state": "active"}
     return {**out, "state": "preparing", "problem": rec.get("reason")}
 
@@ -537,10 +598,20 @@ class Plugin:
             self.store.save()
         except Exception as err:  # noqa: BLE001
             decky.logger.error(f"startup write failed: {err}")
+        self._trimmer = asyncio.get_running_loop().create_task(self._trim_logs())
         decky.logger.info(f"{PLUGIN_NAME} ready")
 
+    async def _trim_logs(self):
+        # MAKO's statistics keep a running game's log growing, also while the panel is closed
+        while True:
+            await asyncio.sleep(30)
+            for appid in list(self.store.data["games"]):
+                await self._run(trim_log, appid)
+
     async def _unload(self):
-        pass
+        task = getattr(self, "_trimmer", None)
+        if task:
+            task.cancel()
 
     async def _uninstall(self):
         # Decky also calls this on updates (the old version is uninstalled before the new one

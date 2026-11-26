@@ -15,7 +15,7 @@ Not affiliated with Lossless Scaling (THS), MAKO or Valve.
 2. Start a game, open the plugin and switch **Lossless Scaling** on.
 3. Restart the game once. From then on the toggle and most settings switch instantly while the game runs.
 
-Under the toggle you see the game and whether frame generation is really active.
+Under the toggle you see the game, whether frame generation is really active and the frame rates.
 
 ## Settings
 
@@ -27,15 +27,21 @@ As in Lossless Scaling's *Frame Generation* panel:
 | Mode | Fixed | *Fixed* multiplies the frame rate; *Adaptive* generates as many frames as needed to reach a target. Switching needs a game restart. |
 | Multiplier | ×2 | Fixed mode: ×2, ×3 or ×4 |
 | Target | 60 (LCD), 90 (OLED) | Adaptive mode: frames per second on screen |
-| Flow Scale | 80 % | resolution of the motion estimation |
+| Flow Scale | 100 % | resolution of the motion estimation; full resolution suits the Deck's 800p |
 | Performance | on | the lighter LSFG model, recommended on the Deck |
+| Frame Rate Limit | 30 (LCD), 45 (OLED) | Fixed mode only, not in Lossless Scaling: limits the game's real frames, see below |
 
 Everything else Lossless Scaling offers (capture, cursor, cropping, scaling, render and GPU options) has
 no meaning on the Deck or is set automatically.
 
-**On the Deck's own screen (no VRR):** with *Fixed ×2*, keep the game at half the refresh rate (30 on the
-LCD, 45 on the OLED), for example with Steam's frame limit. With *Adaptive*, leave the game unlimited and
-set the target to the refresh rate.
+**Frame Rate Limit:** Steam's frame limit acts after frame generation, so it cannot hold the game's real
+frames. In *Fixed* mode the plugin's own limit does that: on the Deck's screen (no VRR) it keeps real
+frames × multiplier at the refresh rate (30 × 2 = 60 on the LCD, 45 × 2 = 90 on the OLED). More real frames
+than that only pile up in front of the screen and add latency. Leave Steam's limit at the refresh rate.
+*Adaptive* lets the game run free below the target and fills in frames up to it, as Lossless Scaling does; a game that runs faster is held at the target, so frames cannot pile up.
+
+Under the toggle you also see the game's real frame rate and what reaches the screen, e.g.
+`30 real FPS → ~60 FPS`.
 
 ## How it works
 
