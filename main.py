@@ -211,8 +211,10 @@ def profile_to_toml(appid: str, game: dict) -> str:
         "adaptive_auto_base_fps_cap = false",
         f"flow_scale = {p['flow_scale'] / 100:.2f}",
         f"performance_mode = {'true' if p['performance'] else 'false'}",
-        # Fixed: the plugin's limit. Adaptive: none, as in Lossless Scaling
-        f"base_fps_cap = {0 if adaptive else p['limit']}",
+        # Fixed: the plugin's limit. Adaptive: the target. Below it the game runs free, as in Lossless
+        # Scaling; above it, where Lossless Scaling's capture skips the extra frames on Windows, the
+        # layer sits in the game's own presents, so the game is held at the target instead of queuing.
+        f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
         "scaling_enabled = false",
     ]
     return "\n".join(lines) + "\n"

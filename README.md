@@ -38,7 +38,7 @@ no meaning on the Deck or is set automatically.
 frames. In *Fixed* mode the plugin's own limit does that: on the Deck's screen (no VRR) it keeps real
 frames × multiplier at the refresh rate (30 × 2 = 60 on the LCD, 45 × 2 = 90 on the OLED). More real frames
 than that only pile up in front of the screen and add latency. Leave Steam's limit at the refresh rate.
-*Adaptive* leaves the game's frame rate alone, as Lossless Scaling does: it fills in frames up to the target.
+*Adaptive* lets the game run free below the target and fills in frames up to it, as Lossless Scaling does; a game that runs faster is held at the target, so frames cannot pile up.
 
 Under the toggle you also see the game's real frame rate and what reaches the screen, e.g.
 `30 real FPS → ~60 FPS`.
