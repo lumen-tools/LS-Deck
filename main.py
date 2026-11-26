@@ -207,13 +207,12 @@ def profile_to_toml(appid: str, game: dict) -> str:
         f"target_fps = {p['target']}",
         # Lossless Scaling's Adaptive has no ceiling to set; MAKO's default
         "adaptive_max_multiplier = 3",
-        # MAKO Decky's default: holds the real frames steady under the target
-        "adaptive_auto_base_fps_cap = true",
+        # as in Lossless Scaling, Adaptive leaves the game's frame rate alone (MAKO's Steady Base Cap off)
+        "adaptive_auto_base_fps_cap = false",
         f"flow_scale = {p['flow_scale'] / 100:.2f}",
         f"performance_mode = {'true' if p['performance'] else 'false'}",
-        # Fixed: the plugin's limit. Adaptive keeps real frames steady under the target itself, but lets
-        # a game run above it: capped at the target, no more frames reach the screen than it shows.
-        f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
+        # Fixed: the plugin's limit. Adaptive: none, as in Lossless Scaling
+        f"base_fps_cap = {0 if adaptive else p['limit']}",
         "scaling_enabled = false",
     ]
     return "\n".join(lines) + "\n"
