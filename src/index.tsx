@@ -23,6 +23,8 @@ interface Profile {
   target: number;
   flow_scale: number;
   performance: boolean;
+  // Fixed mode: real frame limit (0 = off)
+  limit: number;
 }
 
 interface Status {
@@ -58,6 +60,7 @@ type LiveState =
   | "unavailable"
   | "wrong_model"
   | "failed"
+  | "stale"
   | "error";
 
 interface Live {
@@ -68,6 +71,8 @@ interface Live {
   multiplier?: number;
   target?: number;
   restart_needed?: boolean;
+  real_fps?: number;
+  output_fps?: number;
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -185,8 +190,10 @@ const TONE_COLOR: Record<Tone, string> = {
 };
 
 function modeText(live: Live): string {
-  if (live.adaptive) return `LSFG 3.1 · Adaptive, target ${live.target} FPS`;
-  return `LSFG 3.1 · Fixed ×${live.multiplier}`;
+  const mode = live.adaptive ? `Adaptive, target ${live.target}` : `Fixed ×${live.multiplier}`;
+  if (live.real_fps === undefined) return `LSFG 3.1 · ${mode}`;
+  const out = live.output_fps !== undefined ? ` → ~${live.output_fps} FPS` : "";
+  return `${live.real_fps} real FPS${out} · ${mode}`;
 }
 
 function describe(live: Live | null, enabled: boolean, launchOk: boolean): { tone: Tone; title: string; detail?: string } {
@@ -224,6 +231,8 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
       };
     case "failed":
       return { tone: "red", title: "Frame generation failed", detail: live.problem ?? undefined };
+    case "stale":
+      return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
     default:
       return { tone: "red", title: "Could not read status", detail: live.problem ?? undefined };
   }
@@ -302,8 +311,8 @@ function FrameGeneration({
           label="Mode"
           description={
             adaptive
-              ? "Generates as many frames as needed to reach the target, from any base frame rate. Restart the game after switching."
-              : "Multiplies the game's frame rate by a fixed factor. Restart the game after switching."
+              ? "Generates as many frames as needed to reach the target, from any base frame rate."
+              : "Multiplies the game's frame rate by a fixed factor."
           }
           rgOptions={[
             { data: "fixed", label: "Fixed" },
@@ -329,17 +338,50 @@ function FrameGeneration({
           />
         </PanelSectionRow>
       ) : (
-        <PanelSectionRow>
-          <DropdownItem
-            label="Multiplier"
-            description={`Base frame rate × ${p.multiplier} on screen. On a ${refresh} Hz screen without VRR, keep the game at ${Math.round(
-              refresh / p.multiplier,
-            )} FPS.`}
-            rgOptions={[2, 3, 4].map((m) => ({ data: m, label: `×${m}` }))}
-            selectedOption={p.multiplier}
-            onChange={(o) => set("multiplier", o.data)}
-          />
-        </PanelSectionRow>
+        <>
+          <PanelSectionRow>
+            <DropdownItem
+              label="Multiplier"
+              description={`Real frames × ${p.multiplier} on screen.`}
+              rgOptions={[2, 3, 4].map((m) => ({ data: m, label: `×${m}` }))}
+              selectedOption={p.multiplier}
+              onChange={(o) => {
+                // a limit at the old "refresh ÷ multiplier" follows the new multiplier
+                const followed = p.limit === Math.round(refresh / p.multiplier);
+                const next = { ...p, multiplier: o.data, limit: followed ? Math.round(refresh / o.data) : p.limit };
+                setP(next);
+                save(next);
+              }}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ToggleField
+              label="Frame Rate Limit"
+              description={
+                p.limit > 0
+                  ? `Limits the game's real frames to ${p.limit} FPS: ${p.limit} × ${p.multiplier} = ${p.limit * p.multiplier} FPS on screen. Steam's limit acts after frame generation, so leave it at ${refresh}.`
+                  : `Off – the game's real frames are not limited. On this ${refresh} Hz screen, more than ${Math.round(refresh / p.multiplier)} real FPS add latency.`
+              }
+              checked={p.limit > 0}
+              onChange={(on) => set("limit", on ? Math.round(refresh / p.multiplier) : 0)}
+            />
+          </PanelSectionRow>
+          {p.limit > 0 && (
+            <PanelSectionRow>
+              <SliderField
+                label="Base FPS"
+                value={p.limit}
+                min={10}
+                max={120}
+                step={1}
+                showValue={true}
+                editableValue={true}
+                valueSuffix=" FPS"
+                onChange={(n) => set("limit", n)}
+              />
+            </PanelSectionRow>
+          )}
+        </>
       )}
       <PanelSectionRow>
         <SliderField
