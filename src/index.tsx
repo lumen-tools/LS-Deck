@@ -61,6 +61,8 @@ type LiveState =
   | "wrong_model"
   | "failed"
   | "stale"
+  | "at_target"
+  | "settling"
   | "error";
 
 interface Live {
@@ -233,6 +235,18 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
       return { tone: "red", title: "Frame generation failed", detail: live.problem ?? undefined };
     case "stale":
       return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
+    case "at_target":
+      return {
+        tone: "grey",
+        title: "Game at target – no frames needed",
+        detail: `${live.real_fps} real FPS. Frames are generated as soon as the game drops below ${live.target} FPS.`,
+      };
+    case "settling":
+      return {
+        tone: "yellow",
+        title: "Waiting – frame generation is settling",
+        detail: `${live.real_fps} real FPS → ${live.output_fps} FPS. Adaptive is measuring the new frame rate and generates nothing yet.`,
+      };
     default:
       return { tone: "red", title: "Could not read status", detail: live.problem ?? undefined };
   }

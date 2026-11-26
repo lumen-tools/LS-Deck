@@ -322,7 +322,8 @@ export SMOOTH_FRAMES_DISABLE=1 DISABLE_AFMF=1
 # MAKO's per-second frame statistics for the live status; only slow presents above 250 ms are logged
 export MAKO_PRESENT_DIAGNOSTICS="${MAKO_PRESENT_DIAGNOSTICS:-1}"
 export MAKO_PRESENT_DIAGNOSTICS_THRESHOLD_MS="${MAKO_PRESENT_DIAGNOSTICS_THRESHOLD_MS:-250}"
-# MAKO logs to stderr; a plain file (no pipe) cannot stall the game
+# MAKO logs to stderr; a plain file (no pipe) cannot stall the game. The last session's log is kept.
+[ -s "$STATUS_DIR/$appid.log" ] && mv -f "$STATUS_DIR/$appid.log" "$STATUS_DIR/$appid.prev.log" 2>/dev/null
 : > "$STATUS_DIR/$appid.log" 2>/dev/null && exec 2>>"$STATUS_DIR/$appid.log"
 exec "$LAUNCHER" "$@"
 """
@@ -472,7 +473,10 @@ APP_PRESENT_RE = re.compile(
     r"operation=application-queue-present .*?pid=(\d+) .*?sample_end_monotonic_ms=(\d+) .*?calls=(\d+) "
     r".*?entry_interval_mean_ms=([\d.]+)"
 )
-PLAN_RE = re.compile(r"operation=adaptive-plan .*?base_fps=([\d.]+) target_fps=([\d.]+) generated=(\d+)")
+PLAN_RE = re.compile(
+    r"operation=adaptive-plan .*?base_fps=([\d.]+) target_fps=([\d.]+) generated=(\d+) max_generated=(\d+)"
+    r".*?requested_interval_mean_ms=([\d.]+)"
+)
 PROBLEM_RE = re.compile(r"MAKO.*\b(error|failed|unavailable)\b", re.I)
 TAIL_BYTES = 128 * 1024
 
@@ -510,7 +514,15 @@ def _read_log(appid: str) -> dict:
             continue
         m = PLAN_RE.search(line)
         if m:
-            out["plan"] = (float(m.group(1)), float(m.group(2)), int(m.group(3)))
+            # one per second: the real frame rate it plans for, the most generated frames it allows
+            # per real frame right now, and the measured interval of the frames sent to the screen
+            interval = float(m.group(5))
+            out["plan"] = {
+                "base": float(m.group(1)),
+                "target": float(m.group(2)),
+                "max_generated": int(m.group(4)),
+                "output": 1000.0 / interval if interval > 0 else 0.0,
+            }
             continue
         if PROBLEM_RE.search(line) and "present diagnostics" not in line:
             out["problem"] = line.strip()[:240]
@@ -567,9 +579,17 @@ def live_status(appid: str) -> dict:
             if log.get("stats_age", 0) > 5:
                 return {**out, "state": "stale"}
             out["real_fps"] = real
-            if out["adaptive"] and log.get("plan"):
-                base_fps, _target, generated = log["plan"]
-                out["output_fps"] = min(round(base_fps * (1 + generated)), int(out["target"] or 1000))
+            plan = log.get("plan")
+            if out["adaptive"] and plan:
+                target = plan["target"] or out["target"] or 60
+                out["output_fps"] = round(plan["output"])
+                if plan["max_generated"] == 0:
+                    # Adaptive generates nothing right now: either not needed or still settling
+                    if real >= target * 0.95:
+                        return {**out, "state": "at_target"}
+                    return {**out, "state": "settling"}
+                if plan["output"] < real + 1:
+                    return {**out, "state": "at_target"}
             elif not out["adaptive"] and isinstance(out["multiplier"], int):
                 out["output_fps"] = real * out["multiplier"]
         return {**out, "state": "active"}
