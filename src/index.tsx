@@ -75,6 +75,7 @@ interface Live {
   restart_needed?: boolean;
   real_fps?: number;
   output_fps?: number;
+  menu_pause?: boolean;
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -275,6 +276,12 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
         <span>{d.title}</span>
       </div>
       {d.detail && <div style={{ opacity: 0.8 }}>{d.detail}</div>}
+      {live?.menu_pause && ["active", "at_target", "settling"].includes(live.state) && (
+        <div style={{ opacity: 0.6 }}>
+          Frame generation pauses while Steam's menu is open. The numbers are from the
+          game just before; generation resumes when you return.
+        </div>
+      )}
       {restart && <div style={{ color: TONE_COLOR.yellow }}>Restart the game to apply your changes.</div>}
     </div>
   );

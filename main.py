@@ -477,6 +477,7 @@ PLAN_RE = re.compile(
     r"operation=adaptive-plan .*?base_fps=([\d.]+) target_fps=([\d.]+) generated=(\d+) max_generated=(\d+)"
     r".*?requested_interval_mean_ms=([\d.]+)"
 )
+FOCUS_RE = re.compile(r"operation=gamescope-focus .*?state=(\S+) .*?generation_suspended=(\d)")
 PROBLEM_RE = re.compile(r"MAKO.*\b(error|failed|unavailable)\b", re.I)
 TAIL_BYTES = 128 * 1024
 
@@ -505,31 +506,42 @@ def _read_log(appid: str) -> dict:
             text = fh.read().decode("utf-8", errors="replace")
     except OSError:
         return {}
-    out, presents = {}, {}
+    out, presents, last_end = {}, {}, 0
+    suspended = False  # MAKO pauses generation while the Steam menu (this panel too) has focus
     for line in text.splitlines():
         m = APP_PRESENT_RE.search(line)
         if m:
-            # one line per second and swapchain; the game's swapchain is the busiest one
-            presents[m.group(1)] = (int(m.group(2)), int(m.group(3)), float(m.group(4)))
+            last_end = max(last_end, int(m.group(2)))
+            # one line per second and swapchain; the game's swapchain is the busiest one. While the
+            # menu is open the numbers describe the paused state: keep the last ones from the game.
+            if not suspended:
+                presents[m.group(1)] = (int(m.group(2)), int(m.group(3)), float(m.group(4)))
             continue
         m = PLAN_RE.search(line)
         if m:
             # one per second: the real frame rate it plans for, the most generated frames it allows
             # per real frame right now, and the measured interval of the frames sent to the screen
             interval = float(m.group(5))
-            out["plan"] = {
-                "base": float(m.group(1)),
-                "target": float(m.group(2)),
-                "max_generated": int(m.group(4)),
-                "output": 1000.0 / interval if interval > 0 else 0.0,
-            }
+            if not suspended:
+                out["plan"] = {
+                    "base": float(m.group(1)),
+                    "target": float(m.group(2)),
+                    "max_generated": int(m.group(4)),
+                    "output": 1000.0 / interval if interval > 0 else 0.0,
+                }
+            continue
+        m = FOCUS_RE.search(line)
+        if m:
+            suspended = m.group(2) == "1"
             continue
         if PROBLEM_RE.search(line) and "present diagnostics" not in line:
             out["problem"] = line.strip()[:240]
+    out["suspended"] = suspended
     if presents:
-        end_ms, calls, interval = max(presents.values(), key=lambda v: (v[1], v[0]))
+        _end_ms, calls, interval = max(presents.values(), key=lambda v: (v[1], v[0]))
         out["real_fps"] = round(1000.0 / interval) if interval > 0 else 0
-        out["stats_age"] = time.monotonic() - end_ms / 1000.0
+    if last_end:
+        out["stats_age"] = time.monotonic() - last_end / 1000.0
     return out
 
 
@@ -579,6 +591,7 @@ def live_status(appid: str) -> dict:
             if log.get("stats_age", 0) > 5:
                 return {**out, "state": "stale"}
             out["real_fps"] = real
+            out["menu_pause"] = bool(log.get("suspended"))
             plan = log.get("plan")
             if out["adaptive"] and plan:
                 target = plan["target"] or out["target"] or 60
