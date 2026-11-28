@@ -1,7 +1,7 @@
 # LS Deck
 
-Lossless Scaling frame generation (LSFG 3.1) on the Steam Deck, as a Decky plugin, with the settings of
-Lossless Scaling's *Frame Generation* panel and nothing else.
+Lossless Scaling frame generation (LSFG 3.1) and LS1 scaling on the Steam Deck, as a Decky plugin, with the
+settings of Lossless Scaling's *Frame Generation* and *Scaling* panels and nothing else.
 
 You need your own copy of [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/)
 from Steam. It only has to be installed, not started: the plugin uses the LSFG model from its
