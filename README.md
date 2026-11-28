@@ -15,7 +15,9 @@ from Steam for LSFG and LS1. It only has to be installed, not started: the plugi
 
 1. Install the plugin (Decky → Settings → Developer → *Install plugin from ZIP*).
 2. Start a game, open the plugin and switch **Lossless Scaling** on.
-3. Restart the game once. From then on the toggle and most settings switch instantly while the game runs.
+3. Restart the game once. Turning a game on only prepares it: switch on *Frame Generation* and/or
+   *Scaling* below, both start off. From then on the toggle,
+   frame generation and most settings switch instantly while the game runs.
 
 Under the toggle you see the game, whether frame generation and scaling are really active, the frame
 rates and the resolutions.
@@ -28,7 +30,7 @@ As in Lossless Scaling's *Frame Generation* panel:
 
 | Setting | Default | |
 |---|---|---|
-| Type | LSFG 3.1 | *Off* (scaling only) or *LSFG 3.1*, the only LSFG version available on Linux. Switching needs a game restart. |
+| Type | Off | *Off* or *LSFG 3.1*, the only LSFG version available on Linux. Switches instantly while the game runs. With Off the game runs untouched and without a frame limit. |
 | Mode | Fixed | *Fixed* multiplies the frame rate; *Adaptive* generates as many frames as needed to reach a target |
 | Multiplier | ×2 | Fixed mode: ×2, ×3 or ×4 |
 | Target | 60 (LCD), 90 (OLED) | Adaptive mode: frames per second on screen |
@@ -48,12 +50,14 @@ As in Lossless Scaling's *Scaling* panel:
 
 | Setting | Default | |
 |---|---|---|
-| Type | Off | *LS1* or *LS1 Performance* (Lossless Scaling's scaler) or *FSR* (AMD FidelityFX Super Resolution 1, both passes: EASU and RCAS). The game renders at a lower resolution and the scaler brings it to the screen, before frame generation. |
-| Factor | 1.5 | 1.0–2.0: the game renders at 1280×800 ÷ factor (853×533 at 1.5) |
+| Type | Off | *LS1* or *LS1 Performance* (Lossless Scaling's scaler) or *FSR* (AMD FidelityFX Super Resolution 1, both passes: EASU and RCAS). Lower the resolution in the game's settings; the scaler brings it up, before frame generation. |
+| Scaling mode | Auto | *Auto* scales up to the screen size (at most 2×, aspect ratio kept) and follows resolution changes in the game; *Custom* uses the factor |
+| Factor | 1.5 | *Custom* only: 1.0–2.0 in 0.05 steps, the game's resolution × factor, at most the screen size |
 | Sharpness | 90 % | |
 
-Turning scaling on or off and changing the factor need a game restart; type and sharpness apply live. If
-LS1 cannot be loaded, FSR scales instead and the status says so.
+Turning scaling on or off and changing the mode or factor need a game restart; type and sharpness apply
+live. Set Steam's *Game Resolution* (game properties) to the screen's maximum. If LS1 cannot be loaded, FSR
+scales instead and the status says so.
 
 Everything else Lossless Scaling offers (capture, cursor, cropping, render and GPU options) has no meaning
 on the Deck or is set automatically.

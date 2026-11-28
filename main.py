@@ -74,7 +74,8 @@ REFRESH = {"lcd": 60, "oled": 90}.get(DECK_MODEL or "", 60)
 
 # Lossless Scaling's "Frame Generation" panel. Type is always LSFG 3.1, the only one on Linux.
 DEFAULT_PROFILE = {
-    "fg": "lsfg",             # Frame Generation type: Off / LSFG 3.1
+    # turning a game on only prepares it: frame generation and scaling are switched on by hand
+    "fg": "off",              # Frame Generation type: Off / LSFG 3.1
     "mode": "fixed",          # Mode: Fixed / Adaptive
     "multiplier": 2,          # Multiplier (Fixed)
     "target": REFRESH,        # Target (Adaptive): the screen's refresh rate
@@ -83,17 +84,23 @@ DEFAULT_PROFILE = {
     # Fixed mode: limit for the game's real frames (0 = off). Steam's limit acts after frame
     # generation, so on a screen without VRR this keeps base x multiplier at the refresh rate.
     "limit": REFRESH // 2,
-    # Lossless Scaling's "Scaling" panel (restart to turn on/off or change the factor)
+    # Lossless Scaling's "Scaling" panel (restart to turn on/off or change the mode or factor)
     "scaling": "off",         # Type: Off / LS1 / LS1 Performance / FSR
-    "scale_factor": 15,       # tenths: 1.0-2.0 output-to-source ratio per dimension
+    "scale_mode": "auto",     # Scaling mode: Auto (up to the screen size) / Custom (the factor)
+    "scale_factor": 150,      # hundredths: 1.00-2.00 in 0.05 steps
     "sharpness": 90,          # percent; 90 % = FSR's RCAS at 0.2 stops, Gamescope's default
 }
 # need a game restart: they change the layer set, the resources MAKO sets up or the swapchain size
-RESTART_KEYS = ("fg", "scaling", "scale_factor")
+# (Frame Generation is set up whenever Lossless.dll is there, so its Type switches live)
+RESTART_KEYS = ("scaling", "scale_mode", "scale_factor")
+# MAKO's highest factor. With Auto, MAKO caps it at Gamescope's output size (aspect ratio kept),
+# recomputed whenever the game creates its swapchain, so in-game resolution changes follow.
+AUTO_SCALE_FACTOR = 200
 CHOICES = {
     "fg": ("off", "lsfg"),
     "mode": ("fixed", "adaptive"),
     "scaling": ("off", "ls1", "ls1-performance", "fsr"),
+    "scale_mode": ("auto", "custom"),
 }
 # FSR fills MAKO Scaler's slot in this plugin's MAKO build (patches/mako-5.0.0-fsr1.patch)
 SCALING_METHOD = {"ls1": "ls1", "ls1-performance": "ls1-performance", "fsr": "mako"}
@@ -102,7 +109,7 @@ INTS = {
     "target": (30, 240),
     "flow_scale": (25, 100),
     "limit": (0, 240),
-    "scale_factor": (10, 20),
+    "scale_factor": (100, 200),
     "sharpness": (0, 100),
 }
 BOOLS = ("performance",)
@@ -150,6 +157,10 @@ def sanitize_profile(raw) -> dict:
         val = raw.get(key)
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             val = int(round(val))
+            if key == "scale_factor":
+                if val <= 20:  # 1.2.0 test builds stored tenths
+                    val *= 10
+                val = int(round(val / 5)) * 5
             out[key] = 0 if key == "limit" and val <= 0 else max(lo if key != "limit" else 10, min(hi, val))
     for key in BOOLS:
         if isinstance(raw.get(key), bool):
@@ -212,19 +223,20 @@ def find_lossless_dll():
 # settings -> MAKO configuration
 # ---------------------------------------------------------------------------------------------
 
-def profile_to_toml(appid: str, game: dict) -> str:
+def profile_to_toml(appid: str, game: dict, dll_found: bool = True) -> str:
     p = sanitize_profile(game["profile"])
     adaptive = p["mode"] == "adaptive"
-    fg = p["fg"] == "lsfg"
+    fg = game["enabled"] and p["fg"] == "lsfg"
     lines = [
         "[[profile]]",
         f"name = {_toml_str(appid)}",
         # only LSFG: never MAKO's own model
         'frame_generation_model = "lossless-scaling"',
-        # Frame Generation: Off sets up no frame generation at all (scaling only)
-        f"frame_generation_provisioned = {'true' if fg else 'false'}",
-        # the toggle, live: off keeps the layer loaded but passes the game's frames through
-        f"frame_generation_enabled = {'true' if game['enabled'] and fg else 'false'}",
+        # set up whenever LSFG can run, so Frame Generation's Type switches on and off live;
+        # without Lossless.dll none at all (scaling only, FSR needs no DLL)
+        f"frame_generation_provisioned = {'true' if dll_found or fg else 'false'}",
+        # Type, live: Off keeps the layer loaded but passes the game's frames through
+        f"frame_generation_enabled = {'true' if fg else 'false'}",
         f"adaptive = {'true' if adaptive else 'false'}",
         f"multiplier = {p['multiplier']}",
         f"target_fps = {p['target']}",
@@ -237,10 +249,13 @@ def profile_to_toml(appid: str, game: dict) -> str:
         # Fixed: the plugin's limit. Adaptive: the target. Below it the game runs free, as in Lossless
         # Scaling; above it, where Lossless Scaling's capture skips the extra frames on Windows, the
         # layer sits in the game's own presents, so the game is held at the target instead of queuing.
-        f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
+        # The limit belongs to frame generation: with it off the game runs at its own frame rate.
+        f"base_fps_cap = {(p['target'] if adaptive else p['limit']) if fg else 0}",
         f"scaling_enabled = {'false' if p['scaling'] == 'off' else 'true'}",
         f"scaling_method = {_toml_str(SCALING_METHOD.get(p['scaling'], 'ls1'))}",
-        f"scaling_factor = {p['scale_factor'] / 10:.1f}",
+        f"scaling_factor = {(AUTO_SCALE_FACTOR if p['scale_mode'] == 'auto' else p['scale_factor']) / 100:.2f}",
+        # never render above the screen: Auto means "up to the screen size"
+        "scaling_supersampling = false",
         f"scaling_sharpness = {p['sharpness'] / 100:.2f}",
     ]
     return "\n".join(lines) + "\n"
@@ -264,10 +279,9 @@ class Store:
             if not str(appid).isdigit() or not isinstance(g, dict):
                 continue
             raw_profile = g.get("profile")
-            if isinstance(raw_profile, dict) and isinstance(raw_profile.get("scale_factor"), (int, float)) \
-                    and raw_profile["scale_factor"] > 20:
-                # the 1.2.0 test build stored the factor in percent
-                raw_profile = {**raw_profile, "scale_factor": round(raw_profile["scale_factor"] / 10)}
+            if isinstance(raw_profile, dict) and "fg" not in raw_profile:
+                # up to 1.1.0 turning a game on meant frame generation on: keep it that way
+                raw_profile = {**raw_profile, "fg": "lsfg"}
             if isinstance(raw_profile, dict) and "limit" not in raw_profile and raw_profile.get("flow_scale") == 80:
                 # the test build before 1.0.0 started Flow Scale at 80 %: move untouched profiles to 100 %
                 raw_profile = {**raw_profile, "flow_scale": DEFAULT_PROFILE["flow_scale"]}
@@ -300,7 +314,7 @@ class Store:
         if dll:
             parts.append(f"dll = {_toml_str(dll)}")
         for appid, g in sorted(self.data["games"].items()):
-            parts += ["", profile_to_toml(appid, g).rstrip("\n")]
+            parts += ["", profile_to_toml(appid, g, bool(dll)).rstrip("\n")]
         _write_if_changed(CONF_PATH, ("\n".join(parts) + "\n").encode("utf-8"))
         os.makedirs(GAMES_DIR, exist_ok=True)
         for appid, g in self.data["games"].items():
@@ -617,7 +631,7 @@ def live_status(appid: str, changed: float = 0) -> dict:
         }
     if profile.get("frame_generation_provisioned") is False:
         # Frame Generation: Off for this session, scaling only
-        return {**out, "state": "scaling_only" if out.get("scaling") else "preparing"}
+        return {**out, "state": "scaling_only" if out.get("scaling") else "live_off"}
     unavailable = rec.get("frame_generation_unavailable")
     if unavailable:
         reason = unavailable.get("reason") if isinstance(unavailable, dict) else str(unavailable)
@@ -627,7 +641,7 @@ def live_status(appid: str, changed: float = 0) -> dict:
     if rec.get("phase") == "failed":
         return {**out, "state": "failed", "problem": rec.get("reason")}
     if not requested.get("frame_generation_enabled", profile.get("frame_generation_enabled", True)):
-        return {**out, "state": "live_off"}
+        return {**out, "state": "scaling_only" if out.get("scaling") else "live_off"}
     if rec.get("frame_generation_active"):
         log = _read_log(appid)
         real = log.get("real_fps")
@@ -765,7 +779,7 @@ class Plugin:
         appid = valid_appid(appid)
         fresh = copy.deepcopy(DEFAULT_PROFILE)
         cur = self.store.effective_profile(appid)
-        for key in ("fg", "scaling", "scale_factor", "sharpness"):
+        for key in ("fg", "scaling", "scale_mode", "scale_factor", "sharpness"):
             fresh[key] = cur[key]
         return await self.set_game_profile(appid, fresh)
 

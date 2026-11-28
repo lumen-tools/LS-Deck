@@ -28,7 +28,8 @@ interface Profile {
   limit: number;
   // Lossless Scaling's Scaling panel
   scaling: "off" | "ls1" | "ls1-performance" | "fsr";
-  scale_factor: number; // tenths, 10-20 = 1.0-2.0
+  scale_mode: "auto" | "custom";
+  scale_factor: number; // hundredths, 100-200 = 1.00-2.00
   sharpness: number; // percent
 }
 
@@ -209,7 +210,11 @@ function modeText(live: Live): string {
 function describe(live: Live | null, enabled: boolean, launchOk: boolean): { tone: Tone; title: string; detail?: string } {
   if (!live) return { tone: "grey", title: "Loading status…" };
   if (live.state === "live_off" || (!enabled && live.state !== "no_session" && live.state !== "off"))
-    return { tone: "grey", title: "Off", detail: "Real frames only. Turn it back on to compare – it switches instantly while the game runs." };
+    return {
+      tone: "grey",
+      title: enabled ? "Frame generation off" : "Off",
+      detail: "Real frames only, no frame limit. Frame generation switches instantly while the game runs.",
+    };
   switch (live.state) {
     case "no_session":
       if (enabled && !launchOk) return { tone: "red", title: "Launch option missing", detail: "Turn the toggle off and on again." };
@@ -244,7 +249,7 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
     case "stale":
       return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
     case "scaling_only":
-      return { tone: "green", title: "Scaling active – frame generation off" };
+      return { tone: "green", title: "Scaling active – frame generation off", detail: "Frame generation switches instantly while the game runs." };
     case "at_target":
       return {
         tone: "grey",
@@ -323,6 +328,11 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
 // settings: Lossless Scaling's Frame Generation panel
 // ---------------------------------------------------------------------------------------------
 
+// Factor as in Lossless Scaling: 1.0, 1.25, 1.5 …
+function formatFactor(hundredths: number): string {
+  return (hundredths / 100).toFixed(hundredths % 10 === 0 ? 1 : 2);
+}
+
 function useDebounced<T>(fn: (v: T) => void, ms: number) {
   const t = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef(fn);
@@ -362,8 +372,8 @@ function FrameGeneration({
         label="Type"
         description={
           p.fg === "lsfg"
-            ? "Lossless Scaling's frame generation. Restart the game after turning it on or off."
-            : "Off – only scaling, if on. Restart the game after turning it on."
+            ? "Lossless Scaling's frame generation. Switches instantly while the game runs."
+            : "Off – real frames only. Switches instantly while the game runs."
         }
         rgOptions={[
           { data: "off", label: "Off" },
@@ -503,8 +513,8 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
           label="Type"
           description={
             on
-              ? `The game renders at a lower resolution and ${p.scaling === "fsr" ? "FSR 1" : "LS1"} scales it to the screen. Restart the game after turning it on or off.`
-              : "Off – the game renders at the screen's resolution. Restart the game after turning it on."
+              ? `Lower the resolution in the game's settings: ${p.scaling === "fsr" ? "FSR 1" : "LS1"} scales it up. Restart the game after turning it on or off.`
+              : "Off – the game is shown at its own resolution. Restart the game after turning it on."
           }
           rgOptions={[
             { data: "off", label: "Off" },
@@ -519,24 +529,41 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
       {on && (
         <>
           <PanelSectionRow>
-            <SliderField
-              label={`Factor  ${(p.scale_factor / 10).toFixed(1)}`}
-              description={`The game renders at ${Math.round(1280 / (p.scale_factor / 10))}×${Math.round(
-                800 / (p.scale_factor / 10),
-              )} on the Deck's screen. Restart the game after changing it.`}
-              value={p.scale_factor}
-              min={10}
-              max={20}
-              step={1}
-              notchCount={3}
-              notchLabels={[
-                { notchIndex: 0, label: "1.0", value: 10 },
-                { notchIndex: 1, label: "1.5", value: 15 },
-                { notchIndex: 2, label: "2.0", value: 20 },
+            <DropdownItem
+              label="Scaling mode"
+              description={
+                p.scale_mode === "custom"
+                  ? "The game's resolution × the factor, at most the screen size. Restart the game after changing it."
+                  : "Scales the game's resolution up to the screen size (at most 2×), keeping its aspect ratio."
+              }
+              rgOptions={[
+                { data: "auto", label: "Auto" },
+                { data: "custom", label: "Custom" },
               ]}
-              onChange={(n) => set("scale_factor", n)}
+              selectedOption={p.scale_mode}
+              onChange={(o) => set("scale_mode", o.data)}
             />
           </PanelSectionRow>
+          {p.scale_mode === "custom" && (
+            <PanelSectionRow>
+              <SliderField
+                label={`Factor  ${formatFactor(p.scale_factor)}`}
+                value={p.scale_factor}
+                min={100}
+                max={200}
+                step={5}
+                notchCount={5}
+                notchLabels={[
+                  { notchIndex: 0, label: "1.0", value: 100 },
+                  { notchIndex: 1, label: "1.25", value: 125 },
+                  { notchIndex: 2, label: "1.5", value: 150 },
+                  { notchIndex: 3, label: "1.75", value: 175 },
+                  { notchIndex: 4, label: "2.0", value: 200 },
+                ]}
+                onChange={(n) => set("scale_factor", n)}
+              />
+            </PanelSectionRow>
+          )}
           <PanelSectionRow>
             <SliderField
               label="Sharpness"
@@ -581,7 +608,7 @@ function Content() {
     setGame(await setGameProfile(app.appid, merged as unknown as Profile));
   };
   const FG_KEYS: (keyof Profile)[] = ["fg", "mode", "multiplier", "target", "flow_scale", "performance", "limit"];
-  const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_factor", "sharpness"];
+  const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_mode", "scale_factor", "sharpness"];
 
   const refreshStatus = useCallback(async () => setStatus(await getStatus()), []);
   const refreshGames = useCallback(async () => setGames(await listGames()), []);
@@ -754,7 +781,7 @@ function Content() {
           <Scaling profile={game.profile} onChange={saveKeys(SCALING_KEYS)} />
           {game.profile.fg === "off" && game.profile.scaling === "off" && (
             <PanelSectionRow>
-              <div style={{ color: TONE_COLOR.yellow }}>Frame generation and scaling are both off: nothing is active.</div>
+              <div style={{ color: TONE_COLOR.yellow }}>Nothing is active yet: turn on Frame Generation or Scaling.</div>
             </PanelSectionRow>
           )}
         </PanelSection>
