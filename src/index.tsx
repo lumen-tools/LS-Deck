@@ -18,6 +18,7 @@ import { MdAutoAwesomeMotion } from "react-icons/md";
 
 // Lossless Scaling's "Frame Generation" panel (Type: always LSFG 3.1)
 interface Profile {
+  fg: "off" | "lsfg";
   mode: "fixed" | "adaptive";
   multiplier: number;
   target: number;
@@ -25,6 +26,11 @@ interface Profile {
   performance: boolean;
   // Fixed mode: real frame limit (0 = off)
   limit: number;
+  // Lossless Scaling's Scaling panel
+  scaling: "off" | "ls1" | "ls1-performance" | "fsr";
+  scale_mode: "auto" | "custom";
+  scale_factor: number; // hundredths, 100-200 = 1.00-2.00
+  sharpness: number; // percent
 }
 
 interface Status {
@@ -41,6 +47,8 @@ interface GameState {
   appid: string;
   enabled: boolean;
   profile: Profile;
+  // Compare (A/B) is on for the running session
+  compare: boolean;
 }
 
 interface GameEntry {
@@ -57,17 +65,24 @@ type LiveState =
   | "preparing"
   | "active"
   | "live_off"
+  | "compare"
   | "unavailable"
   | "wrong_model"
   | "failed"
   | "stale"
   | "at_target"
+  | "scaling_only"
   | "settling"
   | "error";
 
 interface Live {
   state: LiveState;
   age?: number;
+  // Steam's frame limit in force (0 = off) and the screen's refresh rate
+  steam_limit?: number;
+  panel_hz?: number;
+  // Compare: the base frame rate limit in force
+  limit?: number;
   problem?: string | null;
   adaptive?: boolean;
   multiplier?: number;
@@ -76,6 +91,16 @@ interface Live {
   real_fps?: number;
   output_fps?: number;
   menu_pause?: boolean;
+  scaling?: {
+    active: boolean;
+    pending?: boolean;
+    reason?: string | null;
+    method?: string;
+    requested?: string;
+    source?: number[];
+    output?: number[];
+    fallback?: string | null;
+  };
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -84,6 +109,7 @@ const getGame = callable<[string], GameState>("get_game");
 const setGameEnabled = callable<[string, string, boolean], GameState>("set_game_enabled");
 const setGameProfile = callable<[string, Profile], GameState>("set_game_profile");
 const resetGameProfile = callable<[string], GameState>("reset_game_profile");
+const setCompare = callable<[string, boolean], GameState>("set_compare");
 const forgetGame = callable<[string], boolean>("forget_game");
 const listGames = callable<[], GameEntry[]>("list_games");
 const getLiveStatus = callable<[string], Live>("get_live_status");
@@ -168,7 +194,19 @@ function hasWrapper(opts: string, wrapper: string): boolean {
 }
 
 // another frame generator's launcher in the same game
-const OTHER_WRAPPERS = ["smooth-frames-run", "mako-run", "mako-launch", "lsfg-vk", "~/lsfg"];
+// Other tools that put frame generation or a MAKO layer into a game: only one per game.
+const OTHER_TOOLS: { match: string; name: string }[] = [
+  { match: "smooth-frames-run", name: "Smooth Frames" },
+  { match: "mako-run", name: "MAKO" },
+  { match: "mako-launch", name: "MAKO" },
+  { match: "lsfg-vk", name: "lsfg-vk" },
+  { match: "~/lsfg", name: "lsfg-vk" },
+];
+
+function otherTool(opts: string): string | null {
+  return OTHER_TOOLS.find((t) => opts.includes(t.match))?.name ?? null;
+}
+
 
 async function applyLaunchOptions(appid: string, wrapper: string, enable: boolean): Promise<boolean> {
   const shortcut = isShortcut(appid);
@@ -184,12 +222,13 @@ async function applyLaunchOptions(appid: string, wrapper: string, enable: boolea
 // live status
 // ---------------------------------------------------------------------------------------------
 
-type Tone = "green" | "yellow" | "red" | "grey";
+type Tone = "green" | "yellow" | "red" | "grey" | "blue";
 const TONE_COLOR: Record<Tone, string> = {
   green: "#5ba32b",
   yellow: "#d6a01d",
   red: "#d9453a",
   grey: "#8b929a",
+  blue: "#1a9fff",
 };
 
 function modeText(live: Live): string {
@@ -202,7 +241,11 @@ function modeText(live: Live): string {
 function describe(live: Live | null, enabled: boolean, launchOk: boolean): { tone: Tone; title: string; detail?: string } {
   if (!live) return { tone: "grey", title: "Loading status…" };
   if (live.state === "live_off" || (!enabled && live.state !== "no_session" && live.state !== "off"))
-    return { tone: "grey", title: "Off", detail: "Real frames only. Turn it back on to compare – it switches instantly while the game runs." };
+    return {
+      tone: "grey",
+      title: enabled ? "Frame generation off" : "Off",
+      detail: "Real frames only, no frame limit. Frame generation switches instantly while the game runs.",
+    };
   switch (live.state) {
     case "no_session":
       if (enabled && !launchOk) return { tone: "red", title: "Launch option missing", detail: "Turn the toggle off and on again." };
@@ -236,6 +279,19 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
       return { tone: "red", title: "Frame generation failed", detail: live.problem ?? undefined };
     case "stale":
       return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
+    case "compare":
+      return {
+        tone: "blue",
+        title: "Compare: real frames only",
+        detail:
+          (live.real_fps !== undefined ? `${live.real_fps} real FPS, ` : "") +
+          (live.adaptive
+            ? `still up to ${live.limit ?? live.target} FPS. `
+            : `still limited to ${live.limit} FPS. `) +
+          "Switch Compare off to see frame generation again.",
+      };
+    case "scaling_only":
+      return { tone: "green", title: "Scaling active – frame generation off", detail: "Frame generation switches instantly while the game runs." };
     case "at_target":
       return {
         tone: "grey",
@@ -251,6 +307,59 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
     default:
       return { tone: "red", title: "Could not read status", detail: live.problem ?? undefined };
   }
+}
+
+const SCALER_NAME: Record<string, string> = {
+  ls1: "LS1",
+  "ls1-performance": "LS1 Performance",
+  mako: "FSR",
+  native: "Native",
+};
+
+// MAKO's reasons for not scaling, in plain words
+const SCALING_REASON: Record<string, string> = {
+  "gamescope-presentation-target-no-headroom":
+    "the game outputs at the screen's resolution. Lower it in the game's settings; if it already is, try windowed or exclusive fullscreen.",
+  "variable-surface-no-headroom":
+    "the game outputs at the screen's resolution. Lower it in the game's settings; if it already is, try windowed or exclusive fullscreen.",
+  "variable-surface-memory-budget": "not enough graphics memory for the larger image.",
+  "gamescope-presentation-target-unavailable": "the screen size could not be read from Gamescope. Restart the game.",
+  "gamescope-wsi-surface-unproven": "the screen size could not be read from Gamescope. Restart the game.",
+  "application-extent-mismatch": "the game picked its own window size. Try another display mode in the game.",
+  "application-extent-override-no-source-presentation-split":
+    "the game picked its own window size. Try another display mode in the game.",
+  "factor-not-upscaling": "a factor of 1.0 does not scale.",
+  "swapchain-shape-unsupported": "the game's output format is not supported.",
+  "swapchain-format-unsupported": "the game's output format is not supported.",
+  "queue-presentation-unsupported": "the game's output format is not supported.",
+  "queue-commands-unsupported": "the game's output format is not supported.",
+  "process-unsupported": "not supported for this program.",
+};
+
+function scalingReason(reason?: string | null): string {
+  if (!reason) return " – the game may not render with Vulkan.";
+  return `: ${SCALING_REASON[reason] ?? reason}`;
+}
+
+function ScalingLine({ scaling }: { scaling: NonNullable<Live["scaling"]> }) {
+  if (!scaling.active) {
+    if (scaling.pending) return <div style={{ opacity: 0.8 }}>Scaling: starting…</div>;
+    return <div style={{ color: TONE_COLOR.yellow }}>Scaling not active{scalingReason(scaling.reason)}</div>;
+  }
+  const method = scaling.method ?? "";
+  const requested = scaling.requested ?? method;
+  const name = SCALER_NAME[method] ?? method;
+  const size =
+    scaling.source?.[0] && scaling.output?.[0]
+      ? ` · ${scaling.source![0]}×${scaling.source![1]} → ${scaling.output![0]}×${scaling.output![1]}`
+      : "";
+  if (method !== requested)
+    return (
+      <div style={{ color: TONE_COLOR.yellow }}>
+        {SCALER_NAME[requested] ?? requested} could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
+      </div>
+    );
+  return <div style={{ opacity: 0.8 }}>Scaling: {name}{size}</div>;
 }
 
 function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Live | null; enabled: boolean; launchOk: boolean }) {
@@ -276,6 +385,16 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
         <span>{d.title}</span>
       </div>
       {d.detail && <div style={{ opacity: 0.8 }}>{d.detail}</div>}
+      {live?.scaling && (enabled || live.scaling.active) && <ScalingLine scaling={live.scaling} />}
+      {!enabled && live?.scaling?.active && (
+        <div style={{ color: TONE_COLOR.yellow }}>Scaling stays active until the game restarts.</div>
+      )}
+      {enabled && live?.steam_limit && ["active", "at_target", "settling", "stale"].includes(live.state) ? (
+        <div style={{ color: TONE_COLOR.yellow }}>
+          Steam's frame limit is set to {live.steam_limit} FPS – set it to Off or {live.panel_hz ?? 60} for frame
+          generation and limit the real frames here instead.
+        </div>
+      ) : null}
       {live?.menu_pause && ["active", "at_target", "settling"].includes(live.state) && (
         <div style={{ opacity: 0.6 }}>
           Frame generation pauses while Steam's menu is open. The numbers are from the
@@ -291,16 +410,85 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
 // settings: Lossless Scaling's Frame Generation panel
 // ---------------------------------------------------------------------------------------------
 
-function useDebounced<T>(fn: (v: T) => void, ms: number) {
-  const t = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latest = useRef(fn);
-  latest.current = fn;
-  return useCallback(
-    (v: T) => {
-      if (t.current) clearTimeout(t.current);
-      t.current = setTimeout(() => latest.current(v), ms);
+// Factor as in Lossless Scaling: 1.0, 1.25, 1.5 …
+function formatFactor(hundredths: number): string {
+  return (hundredths / 100).toFixed(hundredths % 10 === 0 ? 1 : 2);
+}
+
+// Local copy of the profile for one section. Dropdowns and toggles save at once, sliders after
+// a short pause; a pending save is sent when the section closes, and the game's saved profile
+// never overwrites a change that is still on its way.
+function useProfileEditor(profile: Profile, onChange: (p: Profile) => void) {
+  const [p, setP] = useState<Profile>(profile);
+  const cur = useRef<Profile>(profile);
+  const pending = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef(onChange);
+  latest.current = onChange;
+  useEffect(() => {
+    if (pending.current) return;
+    cur.current = profile;
+    setP(profile);
+  }, [profile]);
+  const flush = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    if (!pending.current) return;
+    pending.current = false;
+    latest.current(cur.current);
+  }, []);
+  useEffect(() => flush, [flush]);
+  const patch = useCallback(
+    (changes: Partial<Profile>, slider = false) => {
+      cur.current = { ...cur.current, ...changes };
+      setP(cur.current);
+      pending.current = true;
+      if (timer.current) clearTimeout(timer.current);
+      if (slider) timer.current = setTimeout(flush, 350);
+      else flush();
     },
-    [ms],
+    [flush],
+  );
+  const set = <K extends keyof Profile>(k: K, v: Profile[K], slider = false) =>
+    patch({ [k]: v } as Partial<Profile>, slider);
+  return [p, set, patch] as const;
+}
+
+// A/B: real frames only at the same limit, for the running session (off again at the next start)
+function CompareToggle({
+  limit,
+  adaptive,
+  multiplier,
+  compare,
+  running,
+  onCompare,
+}: {
+  limit: number;
+  adaptive: boolean;
+  multiplier: number;
+  compare: boolean;
+  running: boolean;
+  onCompare: (on: boolean) => void;
+}) {
+  const fg = adaptive ? `frame generation up to ${limit} FPS` : `frame generation: ${limit} → ${limit * multiplier} FPS`;
+  return (
+    <PanelSectionRow>
+      <ToggleField
+        label="Compare"
+        description={
+          limit <= 0
+            ? "Needs a frame rate limit, so real frames and frame generation run at the same base frame rate."
+            : !running
+              ? `A/B while the game runs: real frames only, still ${adaptive ? "up to" : "limited to"} ${limit} FPS.`
+              : compare
+                ? `Real frames only, ${adaptive ? "up to" : "at"} ${limit} FPS. Switch off for ${fg}.`
+                : `Real frames only, still ${adaptive ? "up to" : "limited to"} ${limit} FPS. Off again at the next game start.`
+        }
+        checked={compare && limit > 0}
+        disabled={limit <= 0 || (!running && !compare)}
+        onChange={onCompare}
+      />
+    </PanelSectionRow>
   );
 }
 
@@ -309,24 +497,43 @@ function FrameGeneration({
   refresh,
   onChange,
   onReset,
+  compare,
+  running,
+  onCompare,
 }: {
   profile: Profile;
   refresh: number;
   onChange: (p: Profile) => void;
   onReset: () => void;
+  compare: boolean;
+  running: boolean;
+  onCompare: (on: boolean) => void;
 }) {
-  const [p, setP] = useState<Profile>(profile);
-  useEffect(() => setP(profile), [profile]);
-  const save = useDebounced<Profile>(onChange, 350);
-  const set = <K extends keyof Profile>(k: K, v: Profile[K]) => {
-    const next = { ...p, [k]: v };
-    setP(next);
-    save(next);
-  };
+  const [p, set, patch] = useProfileEditor(profile, onChange);
   const adaptive = p.mode === "adaptive";
+  const typeRow = (
+    <PanelSectionRow>
+      <DropdownItem
+        label="Type"
+        description={
+          p.fg === "lsfg"
+            ? "Lossless Scaling's frame generation. Switches instantly while the game runs."
+            : "Off – real frames only. Switches instantly while the game runs."
+        }
+        rgOptions={[
+          { data: "off", label: "Off" },
+          { data: "lsfg", label: "LSFG 3.1" },
+        ]}
+        selectedOption={p.fg}
+        onChange={(o) => set("fg", o.data)}
+      />
+    </PanelSectionRow>
+  );
+  if (p.fg === "off") return typeRow;
 
   return (
     <>
+      {typeRow}
       <PanelSectionRow>
         <DropdownItem
           label="Mode"
@@ -355,7 +562,7 @@ function FrameGeneration({
             showValue={true}
             editableValue={true}
             valueSuffix=" FPS"
-            onChange={(n) => set("target", n)}
+            onChange={(n) => set("target", n, true)}
           />
         </PanelSectionRow>
       ) : (
@@ -369,9 +576,7 @@ function FrameGeneration({
               onChange={(o) => {
                 // a limit at the old "refresh ÷ multiplier" follows the new multiplier
                 const followed = p.limit === Math.round(refresh / p.multiplier);
-                const next = { ...p, multiplier: o.data, limit: followed ? Math.round(refresh / o.data) : p.limit };
-                setP(next);
-                save(next);
+                patch({ multiplier: o.data, limit: followed ? Math.round(refresh / o.data) : p.limit });
               }}
             />
           </PanelSectionRow>
@@ -398,12 +603,20 @@ function FrameGeneration({
                 showValue={true}
                 editableValue={true}
                 valueSuffix=" FPS"
-                onChange={(n) => set("limit", n)}
+                onChange={(n) => set("limit", n, true)}
               />
             </PanelSectionRow>
           )}
         </>
       )}
+      <CompareToggle
+        limit={adaptive ? p.target : p.limit}
+        adaptive={adaptive}
+        multiplier={p.multiplier}
+        compare={compare}
+        running={running}
+        onCompare={onCompare}
+      />
       <PanelSectionRow>
         <SliderField
           label="Flow Scale"
@@ -414,7 +627,7 @@ function FrameGeneration({
           step={5}
           showValue={true}
           valueSuffix=" %"
-          onChange={(n) => set("flow_scale", n)}
+          onChange={(n) => set("flow_scale", n, true)}
         />
       </PanelSectionRow>
       <PanelSectionRow>
@@ -434,6 +647,85 @@ function FrameGeneration({
   );
 }
 
+function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profile) => void }) {
+  const [p, set] = useProfileEditor(profile, onChange);
+  const on = p.scaling !== "off";
+  return (
+    <>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Type"
+          description={
+            on
+              ? `Lower the resolution in the game's settings: ${p.scaling === "fsr" ? "FSR 1" : "LS1"} scales it up. Restart the game after turning it on or off.`
+              : "Off – the game is shown at its own resolution. Restart the game after turning it on."
+          }
+          rgOptions={[
+            { data: "off", label: "Off" },
+            { data: "ls1", label: "LS1" },
+            { data: "ls1-performance", label: "LS1 Performance" },
+            { data: "fsr", label: "FSR" },
+          ]}
+          selectedOption={p.scaling}
+          onChange={(o) => set("scaling", o.data)}
+        />
+      </PanelSectionRow>
+      {on && (
+        <>
+          <PanelSectionRow>
+            <DropdownItem
+              label="Scaling mode"
+              description={
+                p.scale_mode === "custom"
+                  ? "The game's resolution × the factor, at most the screen size. Restart the game after changing it."
+                  : "Scales the game's resolution up to the screen size (at most 2×), keeping its aspect ratio."
+              }
+              rgOptions={[
+                { data: "auto", label: "Auto" },
+                { data: "custom", label: "Custom" },
+              ]}
+              selectedOption={p.scale_mode}
+              onChange={(o) => set("scale_mode", o.data)}
+            />
+          </PanelSectionRow>
+          {p.scale_mode === "custom" && (
+            <PanelSectionRow>
+              <SliderField
+                label={`Factor  ${formatFactor(p.scale_factor)}`}
+                value={p.scale_factor}
+                min={100}
+                max={200}
+                step={5}
+                notchCount={5}
+                notchLabels={[
+                  { notchIndex: 0, label: "1.0", value: 100 },
+                  { notchIndex: 1, label: "1.25", value: 125 },
+                  { notchIndex: 2, label: "1.5", value: 150 },
+                  { notchIndex: 3, label: "1.75", value: 175 },
+                  { notchIndex: 4, label: "2.0", value: 200 },
+                ]}
+                onChange={(n) => set("scale_factor", n, true)}
+              />
+            </PanelSectionRow>
+          )}
+          <PanelSectionRow>
+            <SliderField
+              label="Sharpness"
+              value={p.sharpness}
+              min={0}
+              max={100}
+              step={5}
+              showValue={true}
+              valueSuffix=" %"
+              onChange={(n) => set("sharpness", n, true)}
+            />
+          </PanelSectionRow>
+        </>
+      )}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------------------------
 // main panel
 // ---------------------------------------------------------------------------------------------
@@ -443,12 +735,34 @@ function Content() {
   const [app, setApp] = useState<RunningApp | null>(currentApp());
   const [game, setGame] = useState<GameState | null>(null);
   const [launchOk, setLaunchOk] = useState(true);
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const [live, setLive] = useState<Live | null>(null);
   const [games, setGames] = useState<GameEntry[]>([]);
   const [cleaning, setCleaning] = useState(false);
   const enabledCount = games.filter((g) => g.enabled).length;
+  // the two sections save independently: each sends only its own keys on top of the latest profile
+  const gameRef = useRef<GameState | null>(null);
+  gameRef.current = game;
+  // the newest profile, including saves still on their way (two sections can save at once)
+  const sentProfile = useRef<Profile | null>(null);
+  const saveSeq = useRef(0);
+  const saveKeys = (keys: (keyof Profile)[]) => async (p: Profile) => {
+    const cur = gameRef.current;
+    if (!app || !cur) return;
+    const merged = { ...(sentProfile.current ?? cur.profile) } as Record<string, unknown>;
+    for (const k of keys) merged[k] = p[k];
+    sentProfile.current = merged as unknown as Profile;
+    const seq = ++saveSeq.current;
+    try {
+      const g = await setGameProfile(app.appid, merged as unknown as Profile);
+      if (seq === saveSeq.current) setGame(g); // else a newer save is on its way: its answer counts
+    } finally {
+      if (seq === saveSeq.current) sentProfile.current = null;
+    }
+  };
+  const FG_KEYS: (keyof Profile)[] = ["fg", "mode", "multiplier", "target", "flow_scale", "performance", "limit"];
+  const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_mode", "scale_factor", "sharpness"];
 
   const refreshStatus = useCallback(async () => setStatus(await getStatus()), []);
   const refreshGames = useCallback(async () => setGames(await listGames()), []);
@@ -471,7 +785,7 @@ function Content() {
   useEffect(() => {
     setGame(null);
     setLive(null);
-    setConflict(false);
+    setConflict(null);
     if (!app) return;
     let cancelled = false;
     (async () => {
@@ -483,7 +797,7 @@ function Content() {
           const opts = await readLaunchOptions(app.appid, app.shortcut);
           if (cancelled) return;
           if (g.enabled) setLaunchOk(hasWrapper(opts, status.wrapper));
-          setConflict(OTHER_WRAPPERS.some((w) => opts.includes(w)));
+          setConflict(otherTool(opts));
         } catch {
           /* keep the last value */
         }
@@ -576,8 +890,8 @@ function Content() {
         {status && ready && !haveDll && (
           <PanelSectionRow>
             <div style={{ color: TONE_COLOR.red }}>
-              Lossless Scaling not found. Install it from your Steam library – it only needs to be installed, not
-              started.
+              Lossless Scaling not found. LSFG and LS1 need it installed from your Steam library (it does not need
+              to run); FSR scaling works without it.
             </div>
           </PanelSectionRow>
         )}
@@ -592,14 +906,16 @@ function Content() {
               )
             }
             checked={enabled}
-            disabled={!app || !ready || (!haveDll && !enabled) || toggling || !game}
+            disabled={!app || !ready || toggling || !game || (!enabled && !!conflict)}
             onChange={toggleGame}
           />
         </PanelSectionRow>
         {app && conflict && (
           <PanelSectionRow>
             <div style={{ color: TONE_COLOR.yellow }}>
-              Another frame generation tool is in this game's launch options. Use only one per game.
+              {enabled
+                ? `${conflict} is also in this game's launch options. Use only one per game.`
+                : `${conflict} is on for this game. Turn it off there first – only one per game.`}
             </div>
           </PanelSectionRow>
         )}
@@ -610,9 +926,30 @@ function Content() {
           <FrameGeneration
             profile={game.profile}
             refresh={status?.refresh ?? 60}
-            onChange={async (p) => setGame(await setGameProfile(app.appid, p))}
+            onChange={saveKeys(FG_KEYS)}
             onReset={async () => setGame(await resetGameProfile(app.appid))}
+            compare={game.compare}
+            running={!!live && !["no_session", "off", "error"].includes(live.state)}
+            onCompare={async (on) => {
+              try {
+                setGame(await setCompare(app.appid, on));
+                setTimeout(async () => setLive(await getLiveStatus(app.appid)), 800);
+              } catch (e) {
+                toaster.toast({ title: "LS Deck", body: String(e) });
+              }
+            }}
           />
+        </PanelSection>
+      )}
+
+      {app && game?.enabled && (
+        <PanelSection title="Scaling">
+          <Scaling profile={game.profile} onChange={saveKeys(SCALING_KEYS)} />
+          {game.profile.fg === "off" && game.profile.scaling === "off" && (
+            <PanelSectionRow>
+              <div style={{ color: TONE_COLOR.yellow }}>Nothing is active yet: turn on Frame Generation or Scaling.</div>
+            </PanelSectionRow>
+          )}
         </PanelSection>
       )}
 
