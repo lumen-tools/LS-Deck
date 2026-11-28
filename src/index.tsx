@@ -185,7 +185,19 @@ function hasWrapper(opts: string, wrapper: string): boolean {
 }
 
 // another frame generator's launcher in the same game
-const OTHER_WRAPPERS = ["smooth-frames-run", "mako-run", "mako-launch", "lsfg-vk", "~/lsfg"];
+// Other tools that put frame generation or a MAKO layer into a game: only one per game.
+const OTHER_TOOLS: { match: string; name: string }[] = [
+  { match: "smooth-frames-run", name: "Smooth Frames" },
+  { match: "mako-run", name: "MAKO" },
+  { match: "mako-launch", name: "MAKO" },
+  { match: "lsfg-vk", name: "lsfg-vk" },
+  { match: "~/lsfg", name: "lsfg-vk" },
+];
+
+function otherTool(opts: string): string | null {
+  return OTHER_TOOLS.find((t) => opts.includes(t.match))?.name ?? null;
+}
+
 
 async function applyLaunchOptions(appid: string, wrapper: string, enable: boolean): Promise<boolean> {
   const shortcut = isShortcut(appid);
@@ -644,7 +656,7 @@ function Content() {
   const [app, setApp] = useState<RunningApp | null>(currentApp());
   const [game, setGame] = useState<GameState | null>(null);
   const [launchOk, setLaunchOk] = useState(true);
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const [live, setLive] = useState<Live | null>(null);
   const [games, setGames] = useState<GameEntry[]>([]);
@@ -694,7 +706,7 @@ function Content() {
   useEffect(() => {
     setGame(null);
     setLive(null);
-    setConflict(false);
+    setConflict(null);
     if (!app) return;
     let cancelled = false;
     (async () => {
@@ -706,7 +718,7 @@ function Content() {
           const opts = await readLaunchOptions(app.appid, app.shortcut);
           if (cancelled) return;
           if (g.enabled) setLaunchOk(hasWrapper(opts, status.wrapper));
-          setConflict(OTHER_WRAPPERS.some((w) => opts.includes(w)));
+          setConflict(otherTool(opts));
         } catch {
           /* keep the last value */
         }
@@ -815,14 +827,16 @@ function Content() {
               )
             }
             checked={enabled}
-            disabled={!app || !ready || toggling || !game}
+            disabled={!app || !ready || toggling || !game || (!enabled && !!conflict)}
             onChange={toggleGame}
           />
         </PanelSectionRow>
         {app && conflict && (
           <PanelSectionRow>
             <div style={{ color: TONE_COLOR.yellow }}>
-              Another frame generation tool is in this game's launch options. Use only one per game.
+              {enabled
+                ? `${conflict} is also in this game's launch options. Use only one per game.`
+                : `${conflict} is on for this game. Turn it off there first – only one per game.`}
             </div>
           </PanelSectionRow>
         )}
