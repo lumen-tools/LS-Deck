@@ -1,11 +1,11 @@
 #!/bin/sh
 # Builds release/LS-Deck.zip, the file to install with Decky ("Install plugin from ZIP").
-# Needs curl, xz, Node.js and pnpm.
+# Needs everything scripts/build-engine.sh needs, plus Node.js and pnpm.
 set -eu
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
 
-./scripts/fetch-engine.sh
+./scripts/build-engine.sh
 pnpm install --frozen-lockfile
 pnpm run build
 

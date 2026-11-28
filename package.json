@@ -1,7 +1,7 @@
 {
   "name": "ls-deck",
   "version": "1.2.0",
-  "description": "Lossless Scaling frame generation (LSFG 3.1) on the Steam Deck: per-game toggle, live status and Lossless Scaling's frame generation settings. Needs your own copy of Lossless Scaling.",
+  "description": "Lossless Scaling frame generation (LSFG 3.1) and scaling (LS1, FSR) on the Steam Deck: per-game toggle, live status and Lossless Scaling's frame generation and scaling settings. Needs your own copy of Lossless Scaling.",
   "type": "module",
   "scripts": {
     "build": "rollup -c",

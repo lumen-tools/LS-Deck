@@ -7,9 +7,11 @@
     "tags": [
       "frame-generation",
       "lossless-scaling",
+      "scaling",
+      "fsr",
       "performance"
     ],
-    "description": "Lossless Scaling frame generation (LSFG 3.1) on the Steam Deck, with a per-game toggle, live status and Lossless Scaling's frame generation settings. Uses your own copy of Lossless Scaling; built on the MAKO Renderer layer. Not affiliated with Lossless Scaling (THS), MAKO or Valve.",
+    "description": "Lossless Scaling frame generation (LSFG 3.1) and scaling (LS1, FSR) on the Steam Deck, each on its own or together, with a per-game toggle, live status and Lossless Scaling's own settings. Uses your own copy of Lossless Scaling; built on a modified MAKO Renderer layer (GPL). Not affiliated with Lossless Scaling (THS), AMD, MAKO or Valve.",
     "image": ""
   }
 }

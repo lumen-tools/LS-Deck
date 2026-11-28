@@ -18,6 +18,7 @@ import { MdAutoAwesomeMotion } from "react-icons/md";
 
 // Lossless Scaling's "Frame Generation" panel (Type: always LSFG 3.1)
 interface Profile {
+  fg: "off" | "lsfg";
   mode: "fixed" | "adaptive";
   multiplier: number;
   target: number;
@@ -25,9 +26,9 @@ interface Profile {
   performance: boolean;
   // Fixed mode: real frame limit (0 = off)
   limit: number;
-  // Lossless Scaling's Scaling panel: LS1 only
-  scaling: "off" | "ls1" | "ls1-performance";
-  scale_factor: number; // percent, 100-200
+  // Lossless Scaling's Scaling panel
+  scaling: "off" | "ls1" | "ls1-performance" | "fsr";
+  scale_factor: number; // tenths, 10-20 = 1.0-2.0
   sharpness: number; // percent
 }
 
@@ -66,6 +67,7 @@ type LiveState =
   | "failed"
   | "stale"
   | "at_target"
+  | "scaling_only"
   | "settling"
   | "error";
 
@@ -241,6 +243,8 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
       return { tone: "red", title: "Frame generation failed", detail: live.problem ?? undefined };
     case "stale":
       return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
+    case "scaling_only":
+      return { tone: "green", title: "Scaling active – frame generation off" };
     case "at_target":
       return {
         tone: "grey",
@@ -261,7 +265,7 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
 const SCALER_NAME: Record<string, string> = {
   ls1: "LS1",
   "ls1-performance": "LS1 Performance",
-  mako: "MAKO Scaler",
+  mako: "FSR",
   native: "Native",
 };
 
@@ -274,7 +278,7 @@ function ScalingLine({ scaling }: { scaling: NonNullable<Live["scaling"]> }) {
   if (scaling.method !== scaling.requested)
     return (
       <div style={{ color: TONE_COLOR.yellow }}>
-        LS1 could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
+        {SCALER_NAME[scaling.requested] ?? scaling.requested} could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
       </div>
     );
   return <div style={{ opacity: 0.8 }}>Scaling: {name}{size}</div>;
@@ -352,9 +356,29 @@ function FrameGeneration({
     save(next);
   };
   const adaptive = p.mode === "adaptive";
+  const typeRow = (
+    <PanelSectionRow>
+      <DropdownItem
+        label="Type"
+        description={
+          p.fg === "lsfg"
+            ? "Lossless Scaling's frame generation. Restart the game after turning it on or off."
+            : "Off – only scaling, if on. Restart the game after turning it on."
+        }
+        rgOptions={[
+          { data: "off", label: "Off" },
+          { data: "lsfg", label: "LSFG 3.1" },
+        ]}
+        selectedOption={p.fg}
+        onChange={(o) => set("fg", o.data)}
+      />
+    </PanelSectionRow>
+  );
+  if (p.fg === "off") return typeRow;
 
   return (
     <>
+      {typeRow}
       <PanelSectionRow>
         <DropdownItem
           label="Mode"
@@ -479,13 +503,14 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
           label="Type"
           description={
             on
-              ? "The game renders at a lower resolution and LS1 scales it to the screen. Restart the game after turning it on or off."
+              ? `The game renders at a lower resolution and ${p.scaling === "fsr" ? "FSR 1" : "LS1"} scales it to the screen. Restart the game after turning it on or off.`
               : "Off – the game renders at the screen's resolution. Restart the game after turning it on."
           }
           rgOptions={[
             { data: "off", label: "Off" },
             { data: "ls1", label: "LS1" },
             { data: "ls1-performance", label: "LS1 Performance" },
+            { data: "fsr", label: "FSR" },
           ]}
           selectedOption={p.scaling}
           onChange={(o) => set("scaling", o.data)}
@@ -495,16 +520,20 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
         <>
           <PanelSectionRow>
             <SliderField
-              label="Factor"
-              description={`The game renders at 1/${(p.scale_factor / 100).toFixed(1)} of the screen's width and height (e.g. ${Math.round(
-                1280 / (p.scale_factor / 100),
-              )}×${Math.round(800 / (p.scale_factor / 100))} on the Deck). Restart the game after changing it.`}
+              label={`Factor  ${(p.scale_factor / 10).toFixed(1)}`}
+              description={`The game renders at ${Math.round(1280 / (p.scale_factor / 10))}×${Math.round(
+                800 / (p.scale_factor / 10),
+              )} on the Deck's screen. Restart the game after changing it.`}
               value={p.scale_factor}
-              min={100}
-              max={200}
-              step={10}
-              showValue={true}
-              valueSuffix=" %"
+              min={10}
+              max={20}
+              step={1}
+              notchCount={3}
+              notchLabels={[
+                { notchIndex: 0, label: "1.0", value: 10 },
+                { notchIndex: 1, label: "1.5", value: 15 },
+                { notchIndex: 2, label: "2.0", value: 20 },
+              ]}
               onChange={(n) => set("scale_factor", n)}
             />
           </PanelSectionRow>
@@ -551,7 +580,7 @@ function Content() {
     for (const k of keys) merged[k] = p[k];
     setGame(await setGameProfile(app.appid, merged as unknown as Profile));
   };
-  const FG_KEYS: (keyof Profile)[] = ["mode", "multiplier", "target", "flow_scale", "performance", "limit"];
+  const FG_KEYS: (keyof Profile)[] = ["fg", "mode", "multiplier", "target", "flow_scale", "performance", "limit"];
   const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_factor", "sharpness"];
 
   const refreshStatus = useCallback(async () => setStatus(await getStatus()), []);
@@ -680,8 +709,8 @@ function Content() {
         {status && ready && !haveDll && (
           <PanelSectionRow>
             <div style={{ color: TONE_COLOR.red }}>
-              Lossless Scaling not found. Install it from your Steam library – it only needs to be installed, not
-              started.
+              Lossless Scaling not found. LSFG and LS1 need it installed from your Steam library (it does not need
+              to run); FSR scaling works without it.
             </div>
           </PanelSectionRow>
         )}
@@ -696,7 +725,7 @@ function Content() {
               )
             }
             checked={enabled}
-            disabled={!app || !ready || (!haveDll && !enabled) || toggling || !game}
+            disabled={!app || !ready || toggling || !game}
             onChange={toggleGame}
           />
         </PanelSectionRow>
@@ -723,6 +752,11 @@ function Content() {
       {app && game?.enabled && (
         <PanelSection title="Scaling">
           <Scaling profile={game.profile} onChange={saveKeys(SCALING_KEYS)} />
+          {game.profile.fg === "off" && game.profile.scaling === "off" && (
+            <PanelSectionRow>
+              <div style={{ color: TONE_COLOR.yellow }}>Frame generation and scaling are both off: nothing is active.</div>
+            </PanelSectionRow>
+          )}
         </PanelSection>
       )}
 
