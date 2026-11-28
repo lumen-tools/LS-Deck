@@ -31,8 +31,22 @@ As in Lossless Scaling's *Frame Generation* panel:
 | Performance | on | the lighter LSFG model, recommended on the Deck |
 | Frame Rate Limit | 30 (LCD), 45 (OLED) | Fixed mode only, not in Lossless Scaling: limits the game's real frames, see below |
 
-Everything else Lossless Scaling offers (capture, cursor, cropping, scaling, render and GPU options) has
-no meaning on the Deck or is set automatically.
+### Scaling
+
+As in Lossless Scaling's *Scaling* panel, with Lossless Scaling's own LS1 scaler only:
+
+| Setting | Default | |
+|---|---|---|
+| Type | Off | *LS1* or *LS1 Performance*: the game renders at a lower resolution and LS1 scales it to the screen |
+| Factor | 150 % | the game renders at 1/1.5 of the screen's width and height (853×533 on the Deck) |
+| Sharpness | 80 % | |
+
+Turning scaling on or off and changing the factor need a game restart; type and sharpness apply live.
+LS1 costs GPU time on top of frame generation. The Deck can also scale by itself (Steam's *Scaling
+Filter*: FSR, NIS), at no cost to the game.
+
+Everything else Lossless Scaling offers (capture, cursor, cropping, render and GPU options) has no meaning
+on the Deck or is set automatically.
 
 **Frame Rate Limit:** Steam's frame limit acts after frame generation, so it cannot hold the game's real
 frames. In *Fixed* mode the plugin's own limit does that: on the Deck's screen (no VRR) it keeps real
@@ -47,8 +61,8 @@ Under the toggle you also see the game's real frame rate and what reaches the sc
 
 The Vulkan part is the [MAKO Renderer](https://github.com/eugeniosegala/MAKO) layer (GPL-3.0-or-later),
 which loads LSFG from your Lossless Scaling installation. The plugin ships it unmodified, reduced to the
-frame generation layer and its launcher (`scripts/fetch-engine.sh`): MAKO's own model, scaling, shaders and
-UI are not included. It is installed into `~/.local/share/ls-deck` and only loaded for games where you
+frame generation and scaling layer and its launcher (`scripts/fetch-engine.sh`): MAKO's own model, shaders
+and UI are not included. It is installed into `~/.local/share/ls-deck` and only loaded for games where you
 switch it on, through the launch option the plugin sets:
 
 ```

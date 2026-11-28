@@ -25,6 +25,10 @@ interface Profile {
   performance: boolean;
   // Fixed mode: real frame limit (0 = off)
   limit: number;
+  // Lossless Scaling's Scaling panel: LS1 only
+  scaling: "off" | "ls1" | "ls1-performance";
+  scale_factor: number; // percent, 100-200
+  sharpness: number; // percent
 }
 
 interface Status {
@@ -76,6 +80,7 @@ interface Live {
   real_fps?: number;
   output_fps?: number;
   menu_pause?: boolean;
+  scaling?: { method: string; requested: string; source: number[]; output: number[]; fallback: string | null };
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -253,6 +258,28 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
   }
 }
 
+const SCALER_NAME: Record<string, string> = {
+  ls1: "LS1",
+  "ls1-performance": "LS1 Performance",
+  mako: "MAKO Scaler",
+  native: "Native",
+};
+
+function ScalingLine({ scaling }: { scaling: NonNullable<Live["scaling"]> }) {
+  const name = SCALER_NAME[scaling.method] ?? scaling.method;
+  const size =
+    scaling.source[0] && scaling.output[0]
+      ? ` · ${scaling.source[0]}×${scaling.source[1]} → ${scaling.output[0]}×${scaling.output[1]}`
+      : "";
+  if (scaling.method !== scaling.requested)
+    return (
+      <div style={{ color: TONE_COLOR.yellow }}>
+        LS1 could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
+      </div>
+    );
+  return <div style={{ opacity: 0.8 }}>Scaling: {name}{size}</div>;
+}
+
 function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Live | null; enabled: boolean; launchOk: boolean }) {
   const d = describe(live, enabled, launchOk);
   const restart = enabled && live?.restart_needed;
@@ -276,6 +303,7 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
         <span>{d.title}</span>
       </div>
       {d.detail && <div style={{ opacity: 0.8 }}>{d.detail}</div>}
+      {enabled && live?.scaling && <ScalingLine scaling={live.scaling} />}
       {live?.menu_pause && ["active", "at_target", "settling"].includes(live.state) && (
         <div style={{ opacity: 0.6 }}>
           Frame generation pauses while Steam's menu is open. The numbers are from the
@@ -434,6 +462,70 @@ function FrameGeneration({
   );
 }
 
+function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profile) => void }) {
+  const [p, setP] = useState<Profile>(profile);
+  useEffect(() => setP(profile), [profile]);
+  const save = useDebounced<Profile>(onChange, 350);
+  const set = <K extends keyof Profile>(k: K, v: Profile[K]) => {
+    const next = { ...p, [k]: v };
+    setP(next);
+    save(next);
+  };
+  const on = p.scaling !== "off";
+  return (
+    <>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Type"
+          description={
+            on
+              ? "The game renders at a lower resolution and LS1 scales it to the screen. Restart the game after turning it on or off."
+              : "Off – the game renders at the screen's resolution. Restart the game after turning it on."
+          }
+          rgOptions={[
+            { data: "off", label: "Off" },
+            { data: "ls1", label: "LS1" },
+            { data: "ls1-performance", label: "LS1 Performance" },
+          ]}
+          selectedOption={p.scaling}
+          onChange={(o) => set("scaling", o.data)}
+        />
+      </PanelSectionRow>
+      {on && (
+        <>
+          <PanelSectionRow>
+            <SliderField
+              label="Factor"
+              description={`The game renders at 1/${(p.scale_factor / 100).toFixed(1)} of the screen's width and height (e.g. ${Math.round(
+                1280 / (p.scale_factor / 100),
+              )}×${Math.round(800 / (p.scale_factor / 100))} on the Deck). Restart the game after changing it.`}
+              value={p.scale_factor}
+              min={100}
+              max={200}
+              step={10}
+              showValue={true}
+              valueSuffix=" %"
+              onChange={(n) => set("scale_factor", n)}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <SliderField
+              label="Sharpness"
+              value={p.sharpness}
+              min={0}
+              max={100}
+              step={5}
+              showValue={true}
+              valueSuffix=" %"
+              onChange={(n) => set("sharpness", n)}
+            />
+          </PanelSectionRow>
+        </>
+      )}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------------------------
 // main panel
 // ---------------------------------------------------------------------------------------------
@@ -449,6 +541,18 @@ function Content() {
   const [games, setGames] = useState<GameEntry[]>([]);
   const [cleaning, setCleaning] = useState(false);
   const enabledCount = games.filter((g) => g.enabled).length;
+  // the two sections save independently: each sends only its own keys on top of the latest profile
+  const gameRef = useRef<GameState | null>(null);
+  gameRef.current = game;
+  const saveKeys = (keys: (keyof Profile)[]) => async (p: Profile) => {
+    const cur = gameRef.current;
+    if (!app || !cur) return;
+    const merged = { ...cur.profile } as Record<string, unknown>;
+    for (const k of keys) merged[k] = p[k];
+    setGame(await setGameProfile(app.appid, merged as unknown as Profile));
+  };
+  const FG_KEYS: (keyof Profile)[] = ["mode", "multiplier", "target", "flow_scale", "performance", "limit"];
+  const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_factor", "sharpness"];
 
   const refreshStatus = useCallback(async () => setStatus(await getStatus()), []);
   const refreshGames = useCallback(async () => setGames(await listGames()), []);
@@ -610,9 +714,15 @@ function Content() {
           <FrameGeneration
             profile={game.profile}
             refresh={status?.refresh ?? 60}
-            onChange={async (p) => setGame(await setGameProfile(app.appid, p))}
+            onChange={saveKeys(FG_KEYS)}
             onReset={async () => setGame(await resetGameProfile(app.appid))}
           />
+        </PanelSection>
+      )}
+
+      {app && game?.enabled && (
+        <PanelSection title="Scaling">
+          <Scaling profile={game.profile} onChange={saveKeys(SCALING_KEYS)} />
         </PanelSection>
       )}
 

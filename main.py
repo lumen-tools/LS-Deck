@@ -81,9 +81,22 @@ DEFAULT_PROFILE = {
     # Fixed mode: limit for the game's real frames (0 = off). Steam's limit acts after frame
     # generation, so on a screen without VRR this keeps base x multiplier at the refresh rate.
     "limit": REFRESH // 2,
+    # Lossless Scaling's "Scaling" panel, LS1 only (restart to turn on/off or change the factor)
+    "scaling": "off",         # Type: Off / LS1 / LS1 Performance
+    "scale_factor": 150,      # output-to-source ratio in percent per dimension (1.0-2.0)
+    "sharpness": 80,          # percent
 }
-CHOICES = {"mode": ("fixed", "adaptive")}
-INTS = {"multiplier": (2, 4), "target": (30, 240), "flow_scale": (25, 100), "limit": (0, 240)}
+# need a game restart: they change the layer set or the swapchain size
+RESTART_KEYS = ("scaling", "scale_factor")
+CHOICES = {"mode": ("fixed", "adaptive"), "scaling": ("off", "ls1", "ls1-performance")}
+INTS = {
+    "multiplier": (2, 4),
+    "target": (30, 240),
+    "flow_scale": (25, 100),
+    "limit": (0, 240),
+    "scale_factor": (100, 200),
+    "sharpness": (0, 100),
+}
 BOOLS = ("performance",)
 
 
@@ -215,7 +228,10 @@ def profile_to_toml(appid: str, game: dict) -> str:
         # Scaling; above it, where Lossless Scaling's capture skips the extra frames on Windows, the
         # layer sits in the game's own presents, so the game is held at the target instead of queuing.
         f"base_fps_cap = {p['target'] if adaptive else p['limit']}",
-        "scaling_enabled = false",
+        f"scaling_enabled = {'false' if p['scaling'] == 'off' else 'true'}",
+        f"scaling_method = {_toml_str('ls1' if p['scaling'] == 'off' else p['scaling'])}",
+        f"scaling_factor = {p['scale_factor'] / 100:.2f}",
+        f"scaling_sharpness = {p['sharpness'] / 100:.2f}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -241,10 +257,12 @@ class Store:
             if isinstance(raw_profile, dict) and "limit" not in raw_profile and raw_profile.get("flow_scale") == 80:
                 # the test build before 1.0.0 started Flow Scale at 80 %: move untouched profiles to 100 %
                 raw_profile = {**raw_profile, "flow_scale": DEFAULT_PROFILE["flow_scale"]}
+            changed = g.get("changed", 0)
             games[str(appid)] = {
                 "name": str(g.get("name") or "")[:200],
                 "enabled": bool(g.get("enabled", True)),
                 "profile": sanitize_profile(raw_profile),
+                "changed": changed if isinstance(changed, (int, float)) else 0,
             }
         self.data["games"] = games
 
@@ -545,7 +563,7 @@ def _read_log(appid: str) -> dict:
     return out
 
 
-def live_status(appid: str) -> dict:
+def live_status(appid: str, changed: float = 0) -> dict:
     sess = _read_session(appid)
     if not sess or not _game_running(appid, sess):
         return {"state": "no_session"}
@@ -571,9 +589,18 @@ def live_status(appid: str) -> dict:
         "adaptive": bool(profile.get("adaptive")),
         "multiplier": profile.get("multiplier"),
         "target": profile.get("target_fps"),
-        "restart_needed": bool(pending.get("process_restart")),
+        "restart_needed": bool(pending.get("process_restart")) or changed > sess["start"] + 1,
         "phase": rec.get("phase"),
     }
+    spatial = rec.get("spatial_scaling") if isinstance(rec.get("spatial_scaling"), dict) else {}
+    if spatial.get("active"):
+        out["scaling"] = {
+            "method": spatial.get("active_method"),
+            "requested": spatial.get("requested_method"),
+            "source": [spatial.get("source_width"), spatial.get("source_height")],
+            "output": [spatial.get("presentation_width"), spatial.get("presentation_height")],
+            "fallback": spatial.get("fallback_reason"),
+        }
     unavailable = rec.get("frame_generation_unavailable")
     if unavailable:
         reason = unavailable.get("reason") if isinstance(unavailable, dict) else str(unavailable)
@@ -696,7 +723,7 @@ class Plugin:
     async def set_game_enabled(self, appid, name: str, enabled: bool) -> dict:
         appid = valid_appid(appid)
         g = self.store.data["games"].setdefault(
-            appid, {"name": "", "enabled": False, "profile": copy.deepcopy(DEFAULT_PROFILE)}
+            appid, {"name": "", "enabled": False, "profile": copy.deepcopy(DEFAULT_PROFILE), "changed": 0}
         )
         g["name"] = str(name or g["name"])[:200]
         g["enabled"] = bool(enabled)
@@ -710,12 +737,20 @@ class Plugin:
             raise ValueError("game is not enabled")
         new = sanitize_profile(profile)
         if new != g["profile"]:
+            if any(new[k] != g["profile"][k] for k in RESTART_KEYS):
+                g["changed"] = time.time()
             g["profile"] = new
             await self._run(self.store.save)
         return self._game_view(appid)
 
     async def reset_game_profile(self, appid) -> dict:
-        return await self.set_game_profile(appid, copy.deepcopy(DEFAULT_PROFILE))
+        # the Frame Generation section's reset: scaling keeps its own settings
+        appid = valid_appid(appid)
+        fresh = copy.deepcopy(DEFAULT_PROFILE)
+        cur = self.store.effective_profile(appid)
+        for key in ("scaling", "scale_factor", "sharpness"):
+            fresh[key] = cur[key]
+        return await self.set_game_profile(appid, fresh)
 
     async def forget_game(self, appid) -> bool:
         appid = valid_appid(appid)
@@ -732,7 +767,8 @@ class Plugin:
     async def get_live_status(self, appid) -> dict:
         appid = valid_appid(appid)
         try:
-            return await self._run(live_status, appid)
+            g = self.store.data["games"].get(appid) or {}
+            return await self._run(live_status, appid, g.get("changed", 0))
         except Exception as err:  # noqa: BLE001
             decky.logger.error(f"live status failed: {err}")
             return {"state": "error", "problem": str(err)}
