@@ -223,10 +223,17 @@ def find_lossless_dll():
 # settings -> MAKO configuration
 # ---------------------------------------------------------------------------------------------
 
-def profile_to_toml(appid: str, game: dict, dll_found: bool = True) -> str:
+def compare_possible(game: dict) -> bool:
+    """Compare needs frame generation on and a limit for the real frames (Adaptive: its target)."""
+    p = game["profile"]
+    return bool(game["enabled"] and p["fg"] == "lsfg" and (p["mode"] == "adaptive" or p["limit"] > 0))
+
+
+def profile_to_toml(appid: str, game: dict, dll_found: bool = True, compare: bool = False) -> str:
     p = sanitize_profile(game["profile"])
     adaptive = p["mode"] == "adaptive"
     fg = game["enabled"] and p["fg"] == "lsfg"
+    compare = compare and fg
     lines = [
         "[[profile]]",
         f"name = {_toml_str(appid)}",
@@ -235,8 +242,11 @@ def profile_to_toml(appid: str, game: dict, dll_found: bool = True) -> str:
         # set up whenever LSFG can run, so Frame Generation's Type switches on and off live;
         # without Lossless.dll none at all (scaling only, FSR needs no DLL)
         f"frame_generation_provisioned = {'true' if dll_found or fg else 'false'}",
-        # Type, live: Off keeps the layer loaded but passes the game's frames through
-        f"frame_generation_enabled = {'true' if fg else 'false'}",
+        # Type, live: Off keeps the layer loaded but passes the game's frames through.
+        # Compare (A/B): no generated frames, the limit stays; marked so that the wrapper can undo
+        # it at the next launch (a new session never starts in Compare).
+        (f"frame_generation_enabled = false # ls-deck-compare {appid}" if compare
+         else f"frame_generation_enabled = {'true' if fg else 'false'}"),
         f"adaptive = {'true' if adaptive else 'false'}",
         f"multiplier = {p['multiplier']}",
         f"target_fps = {p['target']}",
@@ -251,6 +261,7 @@ def profile_to_toml(appid: str, game: dict, dll_found: bool = True) -> str:
         # layer sits in the game's own presents, so the game is held at the target instead of queuing.
         # The limit belongs to frame generation: with it off the game runs at its own frame rate.
         f"base_fps_cap = {(p['target'] if adaptive else p['limit']) if fg else 0}",
+        *([f"frame_generation_compare = true # ls-deck-compare {appid}"] if compare else []),
         f"scaling_enabled = {'false' if p['scaling'] == 'off' else 'true'}",
         f"scaling_method = {_toml_str(SCALING_METHOD.get(p['scaling'], 'ls1'))}",
         f"scaling_factor = {(AUTO_SCALE_FACTOR if p['scale_mode'] == 'auto' else p['scale_factor']) / 100:.2f}",
@@ -264,6 +275,16 @@ def profile_to_toml(appid: str, game: dict, dll_found: bool = True) -> str:
 class Store:
     def __init__(self):
         self.data = {"games": {}}
+        # Compare (A/B): real frames only at the same limit, for the running session only
+        self.compare = {}  # appid -> session start
+
+    def compare_active(self, appid: str) -> bool:
+        start = self.compare.get(appid)
+        g = self.data["games"].get(appid)
+        if not start or not g or not compare_possible(g):
+            return False
+        sess = _read_session(appid)
+        return bool(sess and sess["start"] == start and _game_running(appid, sess))
 
     def load(self):
         try:
@@ -314,7 +335,7 @@ class Store:
         if dll:
             parts.append(f"dll = {_toml_str(dll)}")
         for appid, g in sorted(self.data["games"].items()):
-            parts += ["", profile_to_toml(appid, g, bool(dll)).rstrip("\n")]
+            parts += ["", profile_to_toml(appid, g, bool(dll), self.compare_active(appid)).rstrip("\n")]
         _write_if_changed(CONF_PATH, ("\n".join(parts) + "\n").encode("utf-8"))
         os.makedirs(GAMES_DIR, exist_ok=True)
         for appid, g in self.data["games"].items():
@@ -358,6 +379,12 @@ fi
 
 if [ "$on" != 1 ]; then
   exec "$@"
+fi
+
+# a new session starts from the saved settings, never in Compare
+if grep -q "# ls-deck-compare $appid\$" "$CONF" 2>/dev/null; then
+  sed -i -e "s/^frame_generation_enabled = false # ls-deck-compare $appid\$/frame_generation_enabled = true/" \
+    -e "/^frame_generation_compare = true # ls-deck-compare $appid\$/d" "$CONF" 2>/dev/null
 fi
 
 export MAKO_CONFIG="$CONF"
@@ -591,7 +618,7 @@ def _read_log(appid: str) -> dict:
     return out
 
 
-def live_status(appid: str, changed: float = 0) -> dict:
+def live_status(appid: str, changed: float = 0, compare: bool = False) -> dict:
     sess = _read_session(appid)
     if not sess or not _game_running(appid, sess):
         return {"state": "no_session"}
@@ -649,6 +676,15 @@ def live_status(appid: str, changed: float = 0) -> dict:
     if rec.get("phase") == "failed":
         return {**out, "state": "failed", "problem": rec.get("reason")}
     if not requested.get("frame_generation_enabled", profile.get("frame_generation_enabled", True)):
+        if compare:
+            # Compare: real frames only, at the limit (Adaptive: up to its target)
+            log = _read_log(appid)
+            real = log.get("real_fps")
+            out["limit"] = requested.get("base_fps_cap", profile.get("base_fps_cap"))
+            if real is not None:
+                out["real_fps"] = out["output_fps"] = real
+                out["menu_pause"] = bool(log.get("suspended"))
+            return {**out, "state": "compare"}
         return {**out, "state": "scaling_only" if (out.get("scaling") or {}).get("active") else "live_off"}
     if rec.get("frame_generation_active"):
         log = _read_log(appid)
@@ -754,7 +790,24 @@ class Plugin:
 
     def _game_view(self, appid: str) -> dict:
         g = self.store.data["games"].get(appid)
-        return {"appid": appid, "enabled": bool(g and g["enabled"]), "profile": self.store.effective_profile(appid)}
+        return {"appid": appid, "enabled": bool(g and g["enabled"]), "profile": self.store.effective_profile(appid),
+                "compare": self.store.compare_active(appid)}
+
+    async def set_compare(self, appid, on: bool) -> dict:
+        """Compare (A/B): real frames only at the frame rate limit, for the running session."""
+        appid = valid_appid(appid)
+        if on:
+            g = self.store.data["games"].get(appid)
+            sess = _read_session(appid)
+            if not g or not compare_possible(g):
+                raise ValueError("Compare needs frame generation and a frame rate limit")
+            if not sess or not sess["on"] or not _game_running(appid, sess):
+                raise ValueError("start the game with LS Deck first")
+            self.store.compare[appid] = sess["start"]
+        else:
+            self.store.compare.pop(appid, None)
+        await self._run(self.store.write_config)
+        return self._game_view(appid)
 
     async def get_game(self, appid) -> dict:
         return self._game_view(valid_appid(appid))
@@ -766,6 +819,8 @@ class Plugin:
         )
         g["name"] = str(name or g["name"])[:200]
         g["enabled"] = bool(enabled)
+        if not g["enabled"]:
+            self.store.compare.pop(appid, None)
         await self._run(self.store.save)
         return self._game_view(appid)
 
@@ -779,6 +834,8 @@ class Plugin:
             if any(new[k] != g["profile"][k] for k in RESTART_KEYS):
                 g["changed"] = time.time()
             g["profile"] = new
+            if not compare_possible(g):
+                self.store.compare.pop(appid, None)  # nothing left to compare against
             await self._run(self.store.save)
         return self._game_view(appid)
 
@@ -807,7 +864,7 @@ class Plugin:
         appid = valid_appid(appid)
         try:
             g = self.store.data["games"].get(appid) or {}
-            return await self._run(live_status, appid, g.get("changed", 0))
+            return await self._run(live_status, appid, g.get("changed", 0), self.store.compare_active(appid))
         except Exception as err:  # noqa: BLE001
             decky.logger.error(f"live status failed: {err}")
             return {"state": "error", "problem": str(err)}

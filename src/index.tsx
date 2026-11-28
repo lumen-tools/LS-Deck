@@ -47,6 +47,8 @@ interface GameState {
   appid: string;
   enabled: boolean;
   profile: Profile;
+  // Compare (A/B) is on for the running session
+  compare: boolean;
 }
 
 interface GameEntry {
@@ -63,6 +65,7 @@ type LiveState =
   | "preparing"
   | "active"
   | "live_off"
+  | "compare"
   | "unavailable"
   | "wrong_model"
   | "failed"
@@ -75,6 +78,8 @@ type LiveState =
 interface Live {
   state: LiveState;
   age?: number;
+  // Compare: the base frame rate limit in force
+  limit?: number;
   problem?: string | null;
   adaptive?: boolean;
   multiplier?: number;
@@ -101,6 +106,7 @@ const getGame = callable<[string], GameState>("get_game");
 const setGameEnabled = callable<[string, string, boolean], GameState>("set_game_enabled");
 const setGameProfile = callable<[string, Profile], GameState>("set_game_profile");
 const resetGameProfile = callable<[string], GameState>("reset_game_profile");
+const setCompare = callable<[string, boolean], GameState>("set_compare");
 const forgetGame = callable<[string], boolean>("forget_game");
 const listGames = callable<[], GameEntry[]>("list_games");
 const getLiveStatus = callable<[string], Live>("get_live_status");
@@ -213,12 +219,13 @@ async function applyLaunchOptions(appid: string, wrapper: string, enable: boolea
 // live status
 // ---------------------------------------------------------------------------------------------
 
-type Tone = "green" | "yellow" | "red" | "grey";
+type Tone = "green" | "yellow" | "red" | "grey" | "blue";
 const TONE_COLOR: Record<Tone, string> = {
   green: "#5ba32b",
   yellow: "#d6a01d",
   red: "#d9453a",
   grey: "#8b929a",
+  blue: "#1a9fff",
 };
 
 function modeText(live: Live): string {
@@ -269,6 +276,17 @@ function describe(live: Live | null, enabled: boolean, launchOk: boolean): { ton
       return { tone: "red", title: "Frame generation failed", detail: live.problem ?? undefined };
     case "stale":
       return { tone: "grey", title: "No new frames", detail: "Game paused, in a menu or in the background." };
+    case "compare":
+      return {
+        tone: "blue",
+        title: "Compare: real frames only",
+        detail:
+          (live.real_fps !== undefined ? `${live.real_fps} real FPS, ` : "") +
+          (live.adaptive
+            ? `still up to ${live.limit ?? live.target} FPS. `
+            : `still limited to ${live.limit} FPS. `) +
+          "Switch Compare off to see frame generation again.",
+      };
     case "scaling_only":
       return { tone: "green", title: "Scaling active – frame generation off", detail: "Frame generation switches instantly while the game runs." };
     case "at_target":
@@ -427,16 +445,60 @@ function useProfileEditor(profile: Profile, onChange: (p: Profile) => void) {
   return [p, set, patch] as const;
 }
 
+// A/B: real frames only at the same limit, for the running session (off again at the next start)
+function CompareToggle({
+  limit,
+  adaptive,
+  multiplier,
+  compare,
+  running,
+  onCompare,
+}: {
+  limit: number;
+  adaptive: boolean;
+  multiplier: number;
+  compare: boolean;
+  running: boolean;
+  onCompare: (on: boolean) => void;
+}) {
+  const fg = adaptive ? `frame generation up to ${limit} FPS` : `frame generation: ${limit} → ${limit * multiplier} FPS`;
+  return (
+    <PanelSectionRow>
+      <ToggleField
+        label="Compare"
+        description={
+          limit <= 0
+            ? "Needs a frame rate limit, so real frames and frame generation run at the same base frame rate."
+            : !running
+              ? `A/B while the game runs: real frames only, still ${adaptive ? "up to" : "limited to"} ${limit} FPS.`
+              : compare
+                ? `Real frames only, ${adaptive ? "up to" : "at"} ${limit} FPS. Switch off for ${fg}.`
+                : `Real frames only, still ${adaptive ? "up to" : "limited to"} ${limit} FPS. Off again at the next game start.`
+        }
+        checked={compare && limit > 0}
+        disabled={limit <= 0 || (!running && !compare)}
+        onChange={onCompare}
+      />
+    </PanelSectionRow>
+  );
+}
+
 function FrameGeneration({
   profile,
   refresh,
   onChange,
   onReset,
+  compare,
+  running,
+  onCompare,
 }: {
   profile: Profile;
   refresh: number;
   onChange: (p: Profile) => void;
   onReset: () => void;
+  compare: boolean;
+  running: boolean;
+  onCompare: (on: boolean) => void;
 }) {
   const [p, set, patch] = useProfileEditor(profile, onChange);
   const adaptive = p.mode === "adaptive";
@@ -538,6 +600,14 @@ function FrameGeneration({
           )}
         </>
       )}
+      <CompareToggle
+        limit={adaptive ? p.target : p.limit}
+        adaptive={adaptive}
+        multiplier={p.multiplier}
+        compare={compare}
+        running={running}
+        onCompare={onCompare}
+      />
       <PanelSectionRow>
         <SliderField
           label="Flow Scale"
@@ -849,6 +919,16 @@ function Content() {
             refresh={status?.refresh ?? 60}
             onChange={saveKeys(FG_KEYS)}
             onReset={async () => setGame(await resetGameProfile(app.appid))}
+            compare={game.compare}
+            running={!!live && !["no_session", "off", "error"].includes(live.state)}
+            onCompare={async (on) => {
+              try {
+                setGame(await setCompare(app.appid, on));
+                setTimeout(async () => setLive(await getLiveStatus(app.appid)), 800);
+              } catch (e) {
+                toaster.toast({ title: "LS Deck", body: String(e) });
+              }
+            }}
           />
         </PanelSection>
       )}

@@ -31,6 +31,7 @@ As in Lossless Scaling's *Frame Generation* panel:
 | Setting | Default | |
 |---|---|---|
 | Type | Off | *Off* or *LSFG 3.1*, the only LSFG version available on Linux. Switches instantly while the game runs. With Off the game runs untouched and without a frame limit. |
+| Compare | off | A/B while the game runs: real frames only, still at the limit (Fixed) or up to the target (Adaptive). Off again at the next game start. |
 | Mode | Fixed | *Fixed* multiplies the frame rate; *Adaptive* generates as many frames as needed to reach a target |
 | Multiplier | ×2 | Fixed mode: ×2, ×3 or ×4 |
 | Target | 60 (LCD), 90 (OLED) | Adaptive mode: frames per second on screen |
@@ -65,8 +66,9 @@ on the Deck or is set automatically.
 ## How it works
 
 The Vulkan part is the [MAKO Renderer](https://github.com/eugeniosegala/MAKO) layer (GPL-3.0-or-later),
-which loads LSFG and LS1 from your Lossless Scaling installation. The plugin builds it from source with one
-change: MAKO's own scaler is replaced by AMD FidelityFX Super Resolution 1
+which loads LSFG and LS1 from your Lossless Scaling installation. The plugin builds it from source with three
+changes: MAKO's own scaler is replaced by AMD FidelityFX Super Resolution 1, Steam's frame limit works
+while scaling, and *Compare* keeps the limit while frame generation is off
 (`patches/mako-5.0.0-fsr1.patch`, `scripts/build-engine.sh`). MAKO's own frame generation model and its
 UI are not included. It is installed into `~/.local/share/ls-deck` and only loaded for games where you
 switch it on, through the launch option the plugin sets:

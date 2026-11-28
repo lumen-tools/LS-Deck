@@ -6,8 +6,10 @@
 - License: GPL-3.0-or-later, with the third-party notices of the MAKO project
   (`bin/engine/licenses/MAKO-LICENSE.md`, `bin/engine/licenses/MAKO-THIRD_PARTY_NOTICES.md`)
 - Modified by lumen-tools, 2026: MAKO Scaler's reconstruction is replaced by AMD FidelityFX Super
-  Resolution 1 in two passes (EASU, then RCAS). The complete change is `patches/mako-5.0.0-fsr1.patch`
-  (also shipped as `bin/engine/licenses/mako-5.0.0-fsr1.patch`).
+  Resolution 1 in two passes (EASU, then RCAS); Steam's frame limit is held for the game while MAKO
+  keeps it off Gamescope's WSI layer; and a `frame_generation_compare` setting keeps the base frame
+  rate limit while frame generation is off. The complete change is
+  `patches/mako-5.0.0-fsr1.patch` (also shipped as `bin/engine/licenses/mako-5.0.0-fsr1.patch`).
 - Files: `libmako-render.so` (64- and 32-bit), built from source by `scripts/build-engine.sh`;
   `mako-launch` and the Vulkan layer manifests unmodified from the release archive
   `MAKO-Renderer-v5.0.0-linux.tar.xz`

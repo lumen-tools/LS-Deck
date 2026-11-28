@@ -1,3 +1,141 @@
+diff --git a/engine/mako-common/include/mako-common/configuration/config.hpp b/engine/mako-common/include/mako-common/configuration/config.hpp
+index b526857..3cc9946 100644
+--- a/engine/mako-common/include/mako-common/configuration/config.hpp
++++ b/engine/mako-common/include/mako-common/configuration/config.hpp
+@@ -316,6 +316,10 @@ namespace ls {
+         };
+         /// allow frame synthesis to be toggled live without changing its mode
+         bool frame_generation_enabled{GameConfDefaults::frameGenerationEnabled};
++        /// Modified by lumen-tools (2026): keep base_fps_cap applied while
++        /// frame_generation_enabled is false, for an A/B comparison of real
++        /// frames at the same base frame rate
++        bool frame_generation_compare{false};
+         FrameGenerationModel frame_generation_model{GameConfDefaults::frameGenerationModel};
+         /// how often MAKO FG solves motion; Lossless Scaling ignores it
+         MakoFgMode mako_fg_mode{GameConfDefaults::makoFgMode};
+diff --git a/engine/mako-common/src/configuration/config.cpp b/engine/mako-common/src/configuration/config.cpp
+index de29d23..eab2745 100644
+--- a/engine/mako-common/src/configuration/config.cpp
++++ b/engine/mako-common/src/configuration/config.cpp
+@@ -343,6 +343,8 @@ namespace {
+             .frame_generation_enabled = tbl["frame_generation_enabled"].value_or(
+                 GameConfDefaults::frameGenerationEnabled
+             ),
++            .frame_generation_compare =
++                tbl["frame_generation_compare"].value_or(false),
+             .frame_generation_model = frameGenerationModelFromString(
+                 tbl["frame_generation_model"].value_or<std::string>(
+                     frameGenerationModelName(GameConfDefaults::frameGenerationModel))
+@@ -465,6 +467,8 @@ namespace {
+             conf.frame_generation_provisioned
+         );
+         profile.insert("frame_generation_enabled", conf.frame_generation_enabled);
++        if (conf.frame_generation_compare)
++            profile.insert("frame_generation_compare", true);
+         profile.insert("scaling_enabled", conf.scaling_enabled);
+         profile.insert(
+             "swapchain_image_count_compatibility",
+diff --git a/engine/mako-render/src/gamescope_scaling_surface.cpp b/engine/mako-render/src/gamescope_scaling_surface.cpp
+index 39c5faf..20172c5 100644
+--- a/engine/mako-render/src/gamescope_scaling_surface.cpp
++++ b/engine/mako-render/src/gamescope_scaling_surface.cpp
+@@ -214,6 +214,9 @@ struct GamescopeScalingSurface::Impl {
+         uint64_t diagnosticId{};
+         uint64_t refreshCycleNs{};
+         uint64_t refreshIntervalNs{};
++        // Modified by lumen-tools (2026): next slot of Steam's frame limit
++        // when no ordered timeline paces this swapchain
++        std::chrono::steady_clock::time_point frameLimitNext{};
+         ~Content() {
+             if (owner)
+                 owner->release(proxy);
+@@ -658,7 +661,10 @@ struct GamescopeScalingSurface::Impl {
+     }
+     static void refreshCycle(void* data, wl_proxy*, uint32_t hi, uint32_t lo) {
+         auto& content = *static_cast<Content*>(data);
+-        if (content.timingVersion == 1 && content.timing)
++        // Modified by lumen-tools (2026): kept without diagnostics too. In
++        // protocol 1 this cycle carries Steam's frame limit, which Gamescope's
++        // own WSI layer would otherwise enforce for the game.
++        if (content.timingVersion == 1)
+             content.refreshCycleNs = (uint64_t{hi} << 32) | lo;
+     }
+     static void presentTiming(void* data, wl_proxy*, uint32_t serialHi, uint32_t serialLo,
+@@ -1408,6 +1414,13 @@ VkResult GamescopeScalingSurface::preparePresent(
+                 refreshRate = 1e9 / static_cast<double>(interval);
+             if (validCycle(cycle) && (!validCycle(interval) || cycle >= interval))
+                 outputRate = std::min(outputRate, 1e9 / static_cast<double>(cycle));
++        } else if (const auto cycle = content->second->refreshCycleNs;
++                cycle >= 1000000 && cycle <= 1000000000 &&
++                OrderedPresentTimeline::validRate(refreshRate) &&
++                static_cast<double>(cycle) > 1.05e9 / refreshRate) {
++            // Modified by lumen-tools (2026): protocol 1 reports Steam's frame
++            // limit as a longer refresh cycle.
++            outputRate = std::min(outputRate, 1e9 / static_cast<double>(cycle));
+         }
+         slot = content->second->presentTimeline.schedule(
+             now, outputRate, refreshRate, outputBatchSize, generationEnabled, sourceDeadline);
+@@ -1438,6 +1451,41 @@ VkResult GamescopeScalingSurface::preparePresent(
+             surface, swapchain, "present-after-wait");
+         if (afterWait != VK_SUCCESS)
+             return afterWait;
++    } else if (const auto cycle = content->second->refreshCycleNs; cycle >= 1000000 &&
++            cycle <= 1000000000) {
++        // Modified by lumen-tools (2026): without an ordered timeline nothing
++        // else enforces Steam's frame limit here, because MAKO keeps the game
++        // off Gamescope's WSI layer. Hold presents to the reported cycle, like
++        // that layer does, when it is longer than the display's refresh.
++        const uint32_t hz = content->second->refreshHz ? content->second->refreshHz : refreshHz;
++        if (hz > 0 && static_cast<double>(cycle) > 1.05e9 / hz) {
++            const auto period = std::chrono::nanoseconds(cycle);
++            const auto now = std::chrono::steady_clock::now();
++            auto& next = content->second->frameLimitNext;
++            // a stall (loading, menu) restarts the cadence instead of bursting
++            if (next.time_since_epoch().count() == 0 || now > next + period)
++                next = now;
++            const auto wake = next;
++            next = wake + period;
++            if (wake > now) {
++                lock.unlock();
++                std::this_thread::sleep_until(wake);
++                lock.lock();
++                found = impl->surfaces.find(surface);
++                if (found == impl->surfaces.end())
++                    return VK_ERROR_SURFACE_LOST_KHR;
++                content = found->second->contents.find(swapchain);
++                if (content == found->second->contents.end())
++                    return impl->failure(*found->second, nullptr, surface, swapchain,
++                        VK_ERROR_SURFACE_LOST_KHR, "missing-swapchain", "present-after-limit");
++                const auto afterLimit = impl->dispatch(*found->second, content->second.get(),
++                    surface, swapchain, "present-after-limit");
++                if (afterLimit != VK_SUCCESS)
++                    return afterLimit;
++            }
++        } else {
++            content->second->frameLimitNext = {};
++        }
+     }
+     wl_argument args[2]{{.u = found->second->server}, {.u = found->second->window}};
+     impl->marshal(content->second->proxy, 1, nullptr, 1, 0, args);
+diff --git a/engine/mako-render/src/profile_update.hpp b/engine/mako-render/src/profile_update.hpp
+index d0bbfd8..a1df688 100644
+--- a/engine/mako-render/src/profile_update.hpp
++++ b/engine/mako-render/src/profile_update.hpp
+@@ -515,9 +515,12 @@ namespace mako::layer {
+     [[nodiscard]] inline double effectiveBaseFpsCap(
+             const ls::GameConf& profile,
+             const std::optional<uint32_t> gamescopeRefreshHz = std::nullopt) {
+-        if (!profile.frame_generation_provisioned ||
+-                !profile.frame_generation_enabled)
++        if (!profile.frame_generation_provisioned)
+             return 0.0;
++        // Modified by lumen-tools (2026): Compare keeps the cap for real frames.
++        if (!profile.frame_generation_enabled)
++            return profile.frame_generation_compare
++                ? static_cast<double>(profile.base_fps_cap) : 0.0;
+         if (!effectiveFrameGenerationEnabled(profile, gamescopeRefreshHz))
+             return static_cast<double>(profile.base_fps_cap);
+         if (profile.adaptive && profile.adaptive_auto_base_fps_cap) {
 diff --git a/engine/mako-render/src/shaders/ffx_a.h b/engine/mako-render/src/shaders/ffx_a.h
 new file mode 100644
 index 0000000..80fcd43
@@ -4285,6 +4423,167 @@ index 6641d19..a86e15a 100644
          vk::DescriptorSet descriptorSet;
          std::optional<vk::DescriptorPool> directDescriptorPool;
          std::vector<vk::DescriptorSet> directDescriptorSets;
+diff --git a/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp b/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
+index 2f3da77..8a114f6 100644
+--- a/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
++++ b/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
+@@ -29,6 +29,7 @@ extern "C" {
+     uint64_t mako_test_surface_present_serial();
+     void mako_test_surface_staged_timing(uint64_t, uint64_t, uint64_t, uint64_t);
+     void mako_test_surface_timing_properties(uint64_t, uint64_t);
++    void mako_test_surface_refresh_cycle(uint64_t);
+     void mako_test_surface_ownership(bool);
+     void mako_test_surface_delay_events(bool);
+     int mako_test_surface_overrides();
+@@ -1637,5 +1638,57 @@ int main() {
+     }
+     mako_test_surface_protocol(1);
+     expect(mako_test_surface_objects() == 0, "V2 protocol lifetime leaked resources");
++    {
++        // lumen-tools (2026): Steam's frame limit arrives as a protocol 1
++        // refresh cycle. Without Gamescope's WSI layer MAKO has to hold it.
++        GamescopeScalingSurface bridge;
++        expect(bridge.connect(), "frame limit connection");
++        VkSurfaceKHR surface{};
++        const VkXcbSurfaceCreateInfoKHR info{
++            .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
++            .connection = reinterpret_cast<xcb_connection_t*>(1), .window = 71,
++        };
++        expect(bridge.create({}, next, info, nullptr, &surface) == VK_SUCCESS, "frame limit surface");
++        const auto timeFrames = [&](const VkSwapchainKHR swapchain, const int frames) {
++            const auto start = std::chrono::steady_clock::now();
++            for (int frame = 0; frame < frames; ++frame)
++                expect(bridge.preparePresent(surface, swapchain) == VK_SUCCESS, "limited present");
++            return std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - start).count();
++        };
++        // standalone scaling: no ordered timeline
++        const auto standalone = fakeHandle<VkSwapchainKHR>(9101);
++        expect(bridge.createSwapchain(surface, standalone, swapchainInfo(surface),
++            {1920, 1080}, 3, "limit-test", std::nullopt, 60), "standalone limit swapchain");
++        expect(timeFrames(standalone, 10) < 30.0, "display-rate cycle must not hold presents");
++        mako_test_surface_refresh_cycle(16666666);
++        expect(timeFrames(standalone, 10) < 30.0, "a cycle at the refresh rate must not hold presents");
++        mako_test_surface_refresh_cycle(33333333);
++        const double limited = timeFrames(standalone, 10);
++        expect(limited > 9 * 33.3 - 5.0 && limited < 10 * 33.3 + 30.0,
++            "Steam's 30 FPS limit did not hold standalone presents");
++        mako_test_surface_refresh_cycle(16666666);
++        expect(timeFrames(standalone, 10) < 30.0, "lifting the limit must release presents at once");
++        bridge.destroySwapchain(surface, standalone);
++        // ordered FIFO timeline: the cycle becomes its output ceiling
++        const auto ordered = fakeHandle<VkSwapchainKHR>(9102);
++        expect(bridge.createSwapchain(surface, ordered, swapchainInfo(surface),
++            {1920, 1080}, 5, "limit-test", VK_PRESENT_MODE_FIFO_KHR, 60), "ordered limit swapchain");
++        expect(bridge.preparePresent(surface, ordered, 60, 60, 1, false, 1) == VK_SUCCESS, "ordered present");
++        mako_test_surface_refresh_cycle(33333333);
++        expect(bridge.preparePresent(surface, ordered, 60, 60, 1, false, 2) == VK_SUCCESS, "ordered present");
++        auto previous = mako_test_surface_present_time();
++        for (uint32_t frame = 3; frame < 8; ++frame) {
++            expect(bridge.preparePresent(surface, ordered, 60, 60, 1, false, frame) == VK_SUCCESS,
++                "ordered limited present");
++            const auto now = mako_test_surface_present_time();
++            expect(now - previous >= 33000000 && now - previous <= 34000000,
++                "Steam's 30 FPS limit did not space ordered outputs");
++            previous = now;
++        }
++        bridge.destroySwapchain(surface, ordered);
++        bridge.destroy(surface);
++    }
++    expect(mako_test_surface_objects() == 0, "frame limit test leaked resources");
+     std::cout << "Gamescope scaling surface tests passed\n";
+ }
+diff --git a/engine/mako-render/tests/gamescope_surface_client_fixture.cpp b/engine/mako-render/tests/gamescope_surface_client_fixture.cpp
+index 645e0fe..5955399 100644
+--- a/engine/mako-render/tests/gamescope_surface_client_fixture.cpp
++++ b/engine/mako-render/tests/gamescope_surface_client_fixture.cpp
+@@ -63,6 +63,7 @@ namespace {
+     int presentTimes{};
+     uint64_t presentId{};
+     wl_proxy* lastTimedProxy{};
++    wl_proxy* lastFeedbackProxy{};
+     uint64_t presentTime{};
+     uint32_t presentMode{};
+     uint32_t feedbackImageCount{};
+@@ -128,6 +129,8 @@ namespace {
+         });
+         if (lastTimedProxy == proxy)
+             lastTimedProxy = nullptr;
++        if (lastFeedbackProxy == proxy)
++            lastFeedbackProxy = nullptr;
+         std::erase(objects, proxy);
+         delete proxy;
+     }
+@@ -309,6 +312,16 @@ extern "C" {
+             static_cast<uint32_t>(margin >> 32), static_cast<uint32_t>(margin));
+         reinterpret_cast<Refresh>(proxy->listener[1])(proxy->data, proxy, 0, 8333333);
+     }
++    // lumen-tools (2026): protocol 1 refresh_cycle, as Steam's frame limit sends it
++    void mako_test_surface_refresh_cycle(uint64_t ns) {
++        const std::lock_guard fixtureLock(fixtureMutex);
++        auto* proxy = lastFeedbackProxy;
++        if (!proxy || !proxy->listener)
++            std::abort();
++        using Refresh = void (*)(void*, wl_proxy*, uint32_t, uint32_t);
++        reinterpret_cast<Refresh>(proxy->listener[1])(proxy->data, proxy,
++            static_cast<uint32_t>(ns >> 32), static_cast<uint32_t>(ns));
++    }
+     void mako_test_surface_timing() {
+         const std::lock_guard fixtureLock(fixtureMutex);
+         mako_test_surface_ready_timing(0);
+@@ -471,6 +484,7 @@ extern "C" {
+                     associate(proxy, args[0].u, args[1].u);
+             } else if (opcode == 2) {
+                 ++feedbacks;
++                lastFeedbackProxy = proxy;
+                 feedbackImageCount = args[0].u;
+                 feedbackColorSpace = args[2].u;
+                 feedbackEngine = args[6].s;
+diff --git a/engine/mako-render/tests/profile_update_tests.cpp b/engine/mako-render/tests/profile_update_tests.cpp
+index faadd1c..2200010 100644
+--- a/engine/mako-render/tests/profile_update_tests.cpp
++++ b/engine/mako-render/tests/profile_update_tests.cpp
+@@ -48,6 +48,21 @@ namespace {
+ }
+ 
+ int main() {
++    {
++        // lumen-tools (2026): Compare keeps the cap while frame generation is off
++        ls::GameConf compare{};
++        compare.frame_generation_provisioned = true;
++        compare.frame_generation_enabled = false;
++        compare.base_fps_cap = 30;
++        expect(effectiveBaseFpsCap(compare) == 0.0, "frame generation off must lift the cap");
++        compare.frame_generation_compare = true;
++        expect(effectiveBaseFpsCap(compare) == 30.0, "Compare must keep the base frame rate cap");
++        compare.frame_generation_provisioned = false;
++        expect(effectiveBaseFpsCap(compare) == 0.0, "an unprovisioned process has no cap");
++        compare.frame_generation_provisioned = true;
++        compare.frame_generation_enabled = true;
++        expect(effectiveBaseFpsCap(compare) == 30.0, "Compare must not change the enabled cap");
++    }
+     for (const auto requested : {ls::FrameGenerationModel::MakoFg, ls::FrameGenerationModel::LosslessScaling}) {
+         std::vector<ls::FrameGenerationModel> attempts;
+         size_t notices = 0;
+diff --git a/engine/mako-render/tests/spatial_scaling_policy_tests.cpp b/engine/mako-render/tests/spatial_scaling_policy_tests.cpp
+index cd1dcdf..b34d3e8 100644
+--- a/engine/mako-render/tests/spatial_scaling_policy_tests.cpp
++++ b/engine/mako-render/tests/spatial_scaling_policy_tests.cpp
+@@ -407,9 +407,11 @@ int main() {
+     expect(!declaresHalf(embedded::spatialScalingRgba8Spirv) &&
+             !declaresHalf(embedded::spatialScalingRgba16fSpirv),
+         "FP32 scaling variants must not require FP16 arithmetic");
+-    expect(declaresHalf(embedded::spatialScalingRgba8Fp16Spirv) &&
+-            declaresHalf(embedded::spatialScalingRgba16fFp16Spirv),
+-        "both FP16 scaling storage variants must contain real half arithmetic");
++    // Modified by lumen-tools (2026): FSR 1's RCAS runs in FP32 in every
++    // variant (FsrRcasF); the FP16 variants differ only in storage.
++    expect(!declaresHalf(embedded::spatialScalingRgba8Fp16Spirv) &&
++            !declaresHalf(embedded::spatialScalingRgba16fFp16Spirv),
++        "FSR 1 RCAS keeps FP32 arithmetic in the FP16 storage variants");
+ 
+     testVariableMemoryGraphAdmission();
+     expect(spatialScalingProcessSupported(false, false, false),
 diff --git a/engine/scripts/generate-spatial-scaling-spirv.py b/engine/scripts/generate-spatial-scaling-spirv.py
 index 93eb511..1b5da12 100755
 --- a/engine/scripts/generate-spatial-scaling-spirv.py

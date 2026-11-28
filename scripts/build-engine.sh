@@ -1,8 +1,10 @@
 #!/bin/sh
 # Builds the scaling/frame generation engine shipped with this plugin: MAKO Renderer 5.0.0
-# (GPL-3.0-or-later, https://github.com/eugeniosegala/MAKO), modified by lumen-tools so that its
-# scaler is AMD FidelityFX Super Resolution 1 (EASU + RCAS, MIT) instead of MAKO Scaler
-# (patches/mako-5.0.0-fsr1.patch).
+# (GPL-3.0-or-later, https://github.com/eugeniosegala/MAKO), modified by lumen-tools
+# (patches/mako-5.0.0-fsr1.patch): its scaler is AMD FidelityFX Super Resolution 1 (EASU + RCAS,
+# MIT) instead of MAKO Scaler, Steam's frame limit is held while MAKO keeps the game off
+# Gamescope's WSI layer, and frame_generation_compare keeps the base frame rate limit while frame
+# generation is off (A/B comparison).
 #
 # The Vulkan layer is built from source for 64- and 32-bit games; mako-launch, the layer manifests
 # and MAKO's license files come unmodified from the official release archive. Output: bin/engine.
@@ -58,5 +60,5 @@ cp "$work/release/share/doc/mako-render/LICENSE.md" "$out/licenses/MAKO-LICENSE.
 cp "$work/release/share/doc/mako-render/THIRD_PARTY_NOTICES.md" "$out/licenses/MAKO-THIRD_PARTY_NOTICES.md"
 sed -n '1,/^\/\/ MIT LICENSE/p' "$work/mako/engine/mako-render/src/shaders/ffx_a.h" > "$out/licenses/AMD-FSR1-LICENSE.txt"
 cp "$PATCH" "$out/licenses/"
-echo "$VERSION+fsr1" > "$out/VERSION"
+echo "$VERSION+fsr1.2" > "$out/VERSION"
 echo "engine: MAKO Renderer $VERSION with FSR 1 -> $out"
