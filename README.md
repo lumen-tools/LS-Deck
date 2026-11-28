@@ -45,6 +45,17 @@ frames × multiplier at the refresh rate (30 × 2 = 60 on the LCD, 45 × 2 = 90 
 than that only pile up in front of the screen and add latency. Leave Steam's limit at the refresh rate.
 *Adaptive* lets the game run free below the target and fills in frames up to it, as Lossless Scaling does; a game that runs faster is held at the target, so frames cannot pile up.
 
+**Which frame limit to use**
+
+| You use | Limit with | Steam's frame limit |
+|---|---|---|
+| Scaling only (or nothing) | Steam's frame limit | as you like |
+| Frame generation, with or without scaling | the plugin's limit (*Frame Rate Limit*; Adaptive: *Target*) | at the refresh rate (60 LCD, 90 OLED) or off |
+| A/B: real frames against frame generation | *Compare* | at the refresh rate or off |
+
+With frame generation, Steam's limit counts the frames on screen, generated ones included, so it would
+cut frame generation instead of holding the real frames.
+
 ### Scaling
 
 As in Lossless Scaling's *Scaling* panel:
