@@ -6,8 +6,9 @@
 - License: GPL-3.0-or-later, with the third-party notices of the MAKO project
   (`bin/engine/licenses/MAKO-LICENSE.md`, `bin/engine/licenses/MAKO-THIRD_PARTY_NOTICES.md`)
 - Modified by lumen-tools, 2026: MAKO Scaler's reconstruction is replaced by AMD FidelityFX Super
-  Resolution 1 in two passes (EASU, then RCAS); Steam's frame limit is held for the game while MAKO
-  keeps it off Gamescope's WSI layer; and a `frame_generation_compare` setting keeps the base frame
+  Resolution 1 in two passes (EASU, then RCAS); Steam's frame limit (a longer refresh cycle or a
+  lowered display refresh) is held for the game while MAKO keeps it off Gamescope's WSI layer, and
+  reported in the log when `MAKO_REPORT_REFRESH_CYCLE=1` is set; and a `frame_generation_compare` setting keeps the base frame
   rate limit while frame generation is off. The complete change is
   `patches/mako-5.0.0-fsr1.patch` (also shipped as `bin/engine/licenses/mako-5.0.0-fsr1.patch`).
 - Files: `libmako-render.so` (64- and 32-bit), built from source by `scripts/build-engine.sh`;
