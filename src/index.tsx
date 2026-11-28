@@ -78,6 +78,9 @@ type LiveState =
 interface Live {
   state: LiveState;
   age?: number;
+  // Steam's frame limit in force (0 = off) and the screen's refresh rate
+  steam_limit?: number;
+  panel_hz?: number;
   // Compare: the base frame rate limit in force
   limit?: number;
   problem?: string | null;
@@ -386,6 +389,12 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
       {!enabled && live?.scaling?.active && (
         <div style={{ color: TONE_COLOR.yellow }}>Scaling stays active until the game restarts.</div>
       )}
+      {enabled && live?.steam_limit && ["active", "at_target", "settling", "stale"].includes(live.state) ? (
+        <div style={{ color: TONE_COLOR.yellow }}>
+          Steam's frame limit is set to {live.steam_limit} FPS – set it to Off or {live.panel_hz ?? 60} for frame
+          generation and limit the real frames here instead.
+        </div>
+      ) : null}
       {live?.menu_pause && ["active", "at_target", "settling"].includes(live.state) && (
         <div style={{ opacity: 0.6 }}>
           Frame generation pauses while Steam's menu is open. The numbers are from the

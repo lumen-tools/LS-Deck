@@ -60,5 +60,5 @@ cp "$work/release/share/doc/mako-render/LICENSE.md" "$out/licenses/MAKO-LICENSE.
 cp "$work/release/share/doc/mako-render/THIRD_PARTY_NOTICES.md" "$out/licenses/MAKO-THIRD_PARTY_NOTICES.md"
 sed -n '1,/^\/\/ MIT LICENSE/p' "$work/mako/engine/mako-render/src/shaders/ffx_a.h" > "$out/licenses/AMD-FSR1-LICENSE.txt"
 cp "$PATCH" "$out/licenses/"
-echo "$VERSION+fsr1.2" > "$out/VERSION"
+echo "$VERSION+fsr1.3" > "$out/VERSION"
 echo "engine: MAKO Renderer $VERSION with FSR 1 -> $out"

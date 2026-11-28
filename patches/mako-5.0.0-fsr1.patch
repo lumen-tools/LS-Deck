@@ -36,32 +36,47 @@ index de29d23..eab2745 100644
          profile.insert(
              "swapchain_image_count_compatibility",
 diff --git a/engine/mako-render/src/gamescope_scaling_surface.cpp b/engine/mako-render/src/gamescope_scaling_surface.cpp
-index 39c5faf..20172c5 100644
+index 39c5faf..ba9e888 100644
 --- a/engine/mako-render/src/gamescope_scaling_surface.cpp
 +++ b/engine/mako-render/src/gamescope_scaling_surface.cpp
-@@ -214,6 +214,9 @@ struct GamescopeScalingSurface::Impl {
+@@ -214,6 +214,11 @@ struct GamescopeScalingSurface::Impl {
          uint64_t diagnosticId{};
          uint64_t refreshCycleNs{};
          uint64_t refreshIntervalNs{};
 +        // Modified by lumen-tools (2026): next slot of Steam's frame limit
 +        // when no ordered timeline paces this swapchain
 +        std::chrono::steady_clock::time_point frameLimitNext{};
++        // the highest display refresh seen: Steam's frame limit can lower the refresh itself
++        uint32_t peakRefreshHz{};
          ~Content() {
              if (owner)
                  owner->release(proxy);
-@@ -658,7 +661,10 @@ struct GamescopeScalingSurface::Impl {
+@@ -658,8 +663,22 @@ struct GamescopeScalingSurface::Impl {
      }
      static void refreshCycle(void* data, wl_proxy*, uint32_t hi, uint32_t lo) {
          auto& content = *static_cast<Content*>(data);
 -        if (content.timingVersion == 1 && content.timing)
+-            content.refreshCycleNs = (uint64_t{hi} << 32) | lo;
 +        // Modified by lumen-tools (2026): kept without diagnostics too. In
 +        // protocol 1 this cycle carries Steam's frame limit, which Gamescope's
 +        // own WSI layer would otherwise enforce for the game.
-+        if (content.timingVersion == 1)
-             content.refreshCycleNs = (uint64_t{hi} << 32) | lo;
++        if (content.timingVersion == 1) {
++            const uint64_t cycle = (uint64_t{hi} << 32) | lo;
++            // reported for the live status of Decky Smooth Frames and LS Deck
++            static const bool report = [] {
++                const char* value = std::getenv("MAKO_REPORT_REFRESH_CYCLE");
++                return value && *value == '1';
++            }();
++            if (report && cycle != content.refreshCycleNs && cycle >= 1000000 &&
++                    cycle <= 1000000000)
++                std::cerr << "MAKO Renderer: Gamescope refresh cycle: "
++                          << static_cast<double>(cycle) / 1e6 << "ms\n";
++            content.refreshCycleNs = cycle;
++        }
      }
      static void presentTiming(void* data, wl_proxy*, uint32_t serialHi, uint32_t serialLo,
-@@ -1408,6 +1414,13 @@ VkResult GamescopeScalingSurface::preparePresent(
+             uint32_t queueHi, uint32_t queueLo, uint32_t latchHi, uint32_t latchLo,
+@@ -1408,6 +1427,13 @@ VkResult GamescopeScalingSurface::preparePresent(
                  refreshRate = 1e9 / static_cast<double>(interval);
              if (validCycle(cycle) && (!validCycle(interval) || cycle >= interval))
                  outputRate = std::min(outputRate, 1e9 / static_cast<double>(cycle));
@@ -75,19 +90,26 @@ index 39c5faf..20172c5 100644
          }
          slot = content->second->presentTimeline.schedule(
              now, outputRate, refreshRate, outputBatchSize, generationEnabled, sourceDeadline);
-@@ -1438,6 +1451,41 @@ VkResult GamescopeScalingSurface::preparePresent(
+@@ -1438,6 +1464,48 @@ VkResult GamescopeScalingSurface::preparePresent(
              surface, swapchain, "present-after-wait");
          if (afterWait != VK_SUCCESS)
              return afterWait;
-+    } else if (const auto cycle = content->second->refreshCycleNs; cycle >= 1000000 &&
-+            cycle <= 1000000000) {
++    } else {
 +        // Modified by lumen-tools (2026): without an ordered timeline nothing
 +        // else enforces Steam's frame limit here, because MAKO keeps the game
-+        // off Gamescope's WSI layer. Hold presents to the reported cycle, like
-+        // that layer does, when it is longer than the display's refresh.
-+        const uint32_t hz = content->second->refreshHz ? content->second->refreshHz : refreshHz;
-+        if (hz > 0 && static_cast<double>(cycle) > 1.05e9 / hz) {
-+            const auto period = std::chrono::nanoseconds(cycle);
++        // off Gamescope's WSI layer. Steam's limit arrives either as a longer
++        // refresh cycle or, where the panel supports it (40 FPS on the Steam
++        // Deck LCD), as a lower display refresh. Hold presents to it, like that
++        // layer does, so that the game does not render frames nobody sees.
++        auto& state = *content->second;
++        state.peakRefreshHz = std::max({state.peakRefreshHz, state.refreshHz, refreshHz});
++        const uint64_t cycle = state.refreshCycleNs >= 1000000 &&
++            state.refreshCycleNs <= 1000000000 ? state.refreshCycleNs : 0;
++        const uint64_t display = refreshHz > 0 ? 1000000000ull / refreshHz : 0;
++        const uint64_t limitNs = std::max(cycle, display);
++        if (state.peakRefreshHz > 0 && limitNs > 0 &&
++                static_cast<double>(limitNs) > 1.05e9 / state.peakRefreshHz) {
++            const auto period = std::chrono::nanoseconds(limitNs);
 +            const auto now = std::chrono::steady_clock::now();
 +            auto& next = content->second->frameLimitNext;
 +            // a stall (loading, menu) restarts the cadence instead of bursting
@@ -4424,7 +4446,7 @@ index 6641d19..a86e15a 100644
          std::optional<vk::DescriptorPool> directDescriptorPool;
          std::vector<vk::DescriptorSet> directDescriptorSets;
 diff --git a/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp b/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
-index 2f3da77..8a114f6 100644
+index 2f3da77..89f8f34 100644
 --- a/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
 +++ b/engine/mako-render/tests/gamescope_scaling_surface_tests.cpp
 @@ -29,6 +29,7 @@ extern "C" {
@@ -4435,7 +4457,7 @@ index 2f3da77..8a114f6 100644
      void mako_test_surface_ownership(bool);
      void mako_test_surface_delay_events(bool);
      int mako_test_surface_overrides();
-@@ -1637,5 +1638,57 @@ int main() {
+@@ -1637,5 +1638,70 @@ int main() {
      }
      mako_test_surface_protocol(1);
      expect(mako_test_surface_objects() == 0, "V2 protocol lifetime leaked resources");
@@ -4470,6 +4492,19 @@ index 2f3da77..8a114f6 100644
 +            "Steam's 30 FPS limit did not hold standalone presents");
 +        mako_test_surface_refresh_cycle(16666666);
 +        expect(timeFrames(standalone, 10) < 30.0, "lifting the limit must release presents at once");
++        // Steam's 40 FPS on the Deck's LCD lowers the display refresh itself
++        const auto refreshFrames = [&](const uint32_t hz, const int frames) {
++            const auto start = std::chrono::steady_clock::now();
++            for (int frame = 0; frame < frames; ++frame)
++                expect(bridge.preparePresent(surface, standalone, 0.0, hz) == VK_SUCCESS, "refresh present");
++            return std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - start).count();
++        };
++        expect(refreshFrames(60, 10) < 30.0, "the full refresh must not hold presents");
++        const double lowered = refreshFrames(40, 10);
++        expect(lowered > 9 * 25.0 - 5.0 && lowered < 10 * 25.0 + 30.0,
++            "a lowered display refresh did not hold standalone presents");
++        expect(refreshFrames(60, 10) < 30.0, "restoring the refresh must release presents");
 +        bridge.destroySwapchain(surface, standalone);
 +        // ordered FIFO timeline: the cycle becomes its output ceiling
 +        const auto ordered = fakeHandle<VkSwapchainKHR>(9102);

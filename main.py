@@ -389,6 +389,8 @@ fi
 
 export MAKO_CONFIG="$CONF"
 export MAKO_PROFILE_FALLBACK="$appid"
+# Steam's frame limit for the live status (frame generation works best without it)
+export MAKO_REPORT_REFRESH_CYCLE=1
 export MAKO_PRESENT_ACQUIRE_TIMEOUT_MS="${MAKO_PRESENT_ACQUIRE_TIMEOUT_MS:-50}"
 # never two frame generators in one game: Decky Smooth Frames' layer (and afmf-linux) stay out
 export SMOOTH_FRAMES_DISABLE=1 DISABLE_AFMF=1
@@ -550,6 +552,23 @@ PLAN_RE = re.compile(
     r"operation=adaptive-plan .*?base_fps=([\d.]+) target_fps=([\d.]+) generated=(\d+) max_generated=(\d+)"
     r".*?requested_interval_mean_ms=([\d.]+)"
 )
+# Steam's frame limit as Gamescope reports it: a longer refresh cycle or a lower display refresh
+CYCLE_NS_RE = re.compile(r"operation=gamescope-bridge-timing .*?refresh_cycle_ns=(\d+)")
+CYCLE_MS_RE = re.compile(r"MAKO Renderer: Gamescope refresh cycle: ([\d.]+)ms")
+REFRESH_RE = re.compile(r"(?:MAKO Renderer: Gamescope .*?refresh_hz=|operation=fixed-plan .*?display_budget_hz=)(\d+)")
+
+
+def steam_limit_fps(cycle_ms, refresh_hz, peak_hz) -> int:
+    """The frame rate Steam's frame limit holds the screen to, or 0 when it is off."""
+    panel = max(REFRESH, peak_hz or 0)
+    limit = 0
+    if cycle_ms and cycle_ms > 1.05 * 1000.0 / panel:
+        limit = round(1000.0 / cycle_ms)
+    if refresh_hz and refresh_hz < panel * 0.95:
+        limit = min(limit, refresh_hz) if limit else refresh_hz
+    return limit
+
+
 FOCUS_RE = re.compile(r"operation=gamescope-focus .*?state=(\S+) .*?generation_suspended=(\d)")
 PROBLEM_RE = re.compile(r"MAKO.*\b(error|failed|unavailable)\b", re.I)
 TAIL_BYTES = 128 * 1024
@@ -580,8 +599,17 @@ def _read_log(appid: str) -> dict:
     except OSError:
         return {}
     out, presents, last_end = {}, {}, 0
+    cycle_ms, refresh_hz, peak_hz = None, None, 0
     suspended = False  # MAKO pauses generation while the Steam menu (this panel too) has focus
     for line in text.splitlines():
+        m = CYCLE_NS_RE.search(line) or CYCLE_MS_RE.search(line)
+        if m:
+            value = float(m.group(1))
+            cycle_ms = value / 1e6 if m.re is CYCLE_NS_RE else value
+        m = REFRESH_RE.search(line)
+        if m:
+            refresh_hz = int(m.group(1))
+            peak_hz = max(peak_hz, refresh_hz)
         m = APP_PRESENT_RE.search(line)
         if m:
             last_end = max(last_end, int(m.group(2)))
@@ -610,6 +638,7 @@ def _read_log(appid: str) -> dict:
         if PROBLEM_RE.search(line) and "present diagnostics" not in line:
             out["problem"] = line.strip()[:240]
     out["suspended"] = suspended
+    out["steam_limit"] = steam_limit_fps(cycle_ms, refresh_hz, peak_hz)
     if presents:
         _end_ms, calls, interval = max(presents.values(), key=lambda v: (v[1], v[0]))
         out["real_fps"] = round(1000.0 / interval) if interval > 0 else 0
@@ -694,6 +723,8 @@ def live_status(appid: str, changed: float = 0, compare: bool = False) -> dict:
                 return {**out, "state": "stale"}
             out["real_fps"] = real
             out["menu_pause"] = bool(log.get("suspended"))
+            out["steam_limit"] = log.get("steam_limit", 0)
+            out["panel_hz"] = REFRESH
             plan = log.get("plan")
             if out["adaptive"] and plan:
                 target = plan["target"] or out["target"] or 60

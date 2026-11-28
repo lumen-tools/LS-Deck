@@ -54,7 +54,9 @@ than that only pile up in front of the screen and add latency. Leave Steam's lim
 | A/B: real frames against frame generation | *Compare* | at the refresh rate or off |
 
 With frame generation, Steam's limit counts the frames on screen, generated ones included, so it would
-cut frame generation instead of holding the real frames.
+cut frame generation instead of holding the real frames. The live status warns while frame generation runs and Steam's
+limit is set below the refresh rate. Steam's limit works at every value without frame generation, also at
+40 FPS on the LCD, where Steam lowers the screen to 40 Hz.
 
 ### Scaling
 
