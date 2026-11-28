@@ -83,7 +83,16 @@ interface Live {
   real_fps?: number;
   output_fps?: number;
   menu_pause?: boolean;
-  scaling?: { method: string; requested: string; source: number[]; output: number[]; fallback: string | null };
+  scaling?: {
+    active: boolean;
+    pending?: boolean;
+    reason?: string | null;
+    method?: string;
+    requested?: string;
+    source?: number[];
+    output?: number[];
+    fallback?: string | null;
+  };
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -274,16 +283,47 @@ const SCALER_NAME: Record<string, string> = {
   native: "Native",
 };
 
+// MAKO's reasons for not scaling, in plain words
+const SCALING_REASON: Record<string, string> = {
+  "gamescope-presentation-target-no-headroom":
+    "the game outputs at the screen's resolution. Lower it in the game's settings; if it already is, try windowed or exclusive fullscreen.",
+  "variable-surface-no-headroom":
+    "the game outputs at the screen's resolution. Lower it in the game's settings; if it already is, try windowed or exclusive fullscreen.",
+  "variable-surface-memory-budget": "not enough graphics memory for the larger image.",
+  "gamescope-presentation-target-unavailable": "the screen size could not be read from Gamescope. Restart the game.",
+  "gamescope-wsi-surface-unproven": "the screen size could not be read from Gamescope. Restart the game.",
+  "application-extent-mismatch": "the game picked its own window size. Try another display mode in the game.",
+  "application-extent-override-no-source-presentation-split":
+    "the game picked its own window size. Try another display mode in the game.",
+  "factor-not-upscaling": "a factor of 1.0 does not scale.",
+  "swapchain-shape-unsupported": "the game's output format is not supported.",
+  "swapchain-format-unsupported": "the game's output format is not supported.",
+  "queue-presentation-unsupported": "the game's output format is not supported.",
+  "queue-commands-unsupported": "the game's output format is not supported.",
+  "process-unsupported": "not supported for this program.",
+};
+
+function scalingReason(reason?: string | null): string {
+  if (!reason) return " – the game may not render with Vulkan.";
+  return `: ${SCALING_REASON[reason] ?? reason}`;
+}
+
 function ScalingLine({ scaling }: { scaling: NonNullable<Live["scaling"]> }) {
-  const name = SCALER_NAME[scaling.method] ?? scaling.method;
+  if (!scaling.active) {
+    if (scaling.pending) return <div style={{ opacity: 0.8 }}>Scaling: starting…</div>;
+    return <div style={{ color: TONE_COLOR.yellow }}>Scaling not active{scalingReason(scaling.reason)}</div>;
+  }
+  const method = scaling.method ?? "";
+  const requested = scaling.requested ?? method;
+  const name = SCALER_NAME[method] ?? method;
   const size =
-    scaling.source[0] && scaling.output[0]
-      ? ` · ${scaling.source[0]}×${scaling.source[1]} → ${scaling.output[0]}×${scaling.output[1]}`
+    scaling.source?.[0] && scaling.output?.[0]
+      ? ` · ${scaling.source![0]}×${scaling.source![1]} → ${scaling.output![0]}×${scaling.output![1]}`
       : "";
-  if (scaling.method !== scaling.requested)
+  if (method !== requested)
     return (
       <div style={{ color: TONE_COLOR.yellow }}>
-        {SCALER_NAME[scaling.requested] ?? scaling.requested} could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
+        {SCALER_NAME[requested] ?? requested} could not be loaded, {name} scales instead{size}.{scaling.fallback ? ` ${scaling.fallback}` : ""}
       </div>
     );
   return <div style={{ opacity: 0.8 }}>Scaling: {name}{size}</div>;
@@ -312,7 +352,10 @@ function GameLine({ app, live, enabled, launchOk }: { app: RunningApp; live: Liv
         <span>{d.title}</span>
       </div>
       {d.detail && <div style={{ opacity: 0.8 }}>{d.detail}</div>}
-      {enabled && live?.scaling && <ScalingLine scaling={live.scaling} />}
+      {live?.scaling && (enabled || live.scaling.active) && <ScalingLine scaling={live.scaling} />}
+      {!enabled && live?.scaling?.active && (
+        <div style={{ color: TONE_COLOR.yellow }}>Scaling stays active until the game restarts.</div>
+      )}
       {live?.menu_pause && ["active", "at_target", "settling"].includes(live.state) && (
         <div style={{ opacity: 0.6 }}>
           Frame generation pauses while Steam's menu is open. The numbers are from the
@@ -333,17 +376,43 @@ function formatFactor(hundredths: number): string {
   return (hundredths / 100).toFixed(hundredths % 10 === 0 ? 1 : 2);
 }
 
-function useDebounced<T>(fn: (v: T) => void, ms: number) {
-  const t = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latest = useRef(fn);
-  latest.current = fn;
-  return useCallback(
-    (v: T) => {
-      if (t.current) clearTimeout(t.current);
-      t.current = setTimeout(() => latest.current(v), ms);
+// Local copy of the profile for one section. Dropdowns and toggles save at once, sliders after
+// a short pause; a pending save is sent when the section closes, and the game's saved profile
+// never overwrites a change that is still on its way.
+function useProfileEditor(profile: Profile, onChange: (p: Profile) => void) {
+  const [p, setP] = useState<Profile>(profile);
+  const cur = useRef<Profile>(profile);
+  const pending = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef(onChange);
+  latest.current = onChange;
+  useEffect(() => {
+    if (pending.current) return;
+    cur.current = profile;
+    setP(profile);
+  }, [profile]);
+  const flush = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    if (!pending.current) return;
+    pending.current = false;
+    latest.current(cur.current);
+  }, []);
+  useEffect(() => flush, [flush]);
+  const patch = useCallback(
+    (changes: Partial<Profile>, slider = false) => {
+      cur.current = { ...cur.current, ...changes };
+      setP(cur.current);
+      pending.current = true;
+      if (timer.current) clearTimeout(timer.current);
+      if (slider) timer.current = setTimeout(flush, 350);
+      else flush();
     },
-    [ms],
+    [flush],
   );
+  const set = <K extends keyof Profile>(k: K, v: Profile[K], slider = false) =>
+    patch({ [k]: v } as Partial<Profile>, slider);
+  return [p, set, patch] as const;
 }
 
 function FrameGeneration({
@@ -357,14 +426,7 @@ function FrameGeneration({
   onChange: (p: Profile) => void;
   onReset: () => void;
 }) {
-  const [p, setP] = useState<Profile>(profile);
-  useEffect(() => setP(profile), [profile]);
-  const save = useDebounced<Profile>(onChange, 350);
-  const set = <K extends keyof Profile>(k: K, v: Profile[K]) => {
-    const next = { ...p, [k]: v };
-    setP(next);
-    save(next);
-  };
+  const [p, set, patch] = useProfileEditor(profile, onChange);
   const adaptive = p.mode === "adaptive";
   const typeRow = (
     <PanelSectionRow>
@@ -417,7 +479,7 @@ function FrameGeneration({
             showValue={true}
             editableValue={true}
             valueSuffix=" FPS"
-            onChange={(n) => set("target", n)}
+            onChange={(n) => set("target", n, true)}
           />
         </PanelSectionRow>
       ) : (
@@ -431,9 +493,7 @@ function FrameGeneration({
               onChange={(o) => {
                 // a limit at the old "refresh ÷ multiplier" follows the new multiplier
                 const followed = p.limit === Math.round(refresh / p.multiplier);
-                const next = { ...p, multiplier: o.data, limit: followed ? Math.round(refresh / o.data) : p.limit };
-                setP(next);
-                save(next);
+                patch({ multiplier: o.data, limit: followed ? Math.round(refresh / o.data) : p.limit });
               }}
             />
           </PanelSectionRow>
@@ -460,7 +520,7 @@ function FrameGeneration({
                 showValue={true}
                 editableValue={true}
                 valueSuffix=" FPS"
-                onChange={(n) => set("limit", n)}
+                onChange={(n) => set("limit", n, true)}
               />
             </PanelSectionRow>
           )}
@@ -476,7 +536,7 @@ function FrameGeneration({
           step={5}
           showValue={true}
           valueSuffix=" %"
-          onChange={(n) => set("flow_scale", n)}
+          onChange={(n) => set("flow_scale", n, true)}
         />
       </PanelSectionRow>
       <PanelSectionRow>
@@ -497,14 +557,7 @@ function FrameGeneration({
 }
 
 function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profile) => void }) {
-  const [p, setP] = useState<Profile>(profile);
-  useEffect(() => setP(profile), [profile]);
-  const save = useDebounced<Profile>(onChange, 350);
-  const set = <K extends keyof Profile>(k: K, v: Profile[K]) => {
-    const next = { ...p, [k]: v };
-    setP(next);
-    save(next);
-  };
+  const [p, set] = useProfileEditor(profile, onChange);
   const on = p.scaling !== "off";
   return (
     <>
@@ -560,7 +613,7 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
                   { notchIndex: 3, label: "1.75", value: 175 },
                   { notchIndex: 4, label: "2.0", value: 200 },
                 ]}
-                onChange={(n) => set("scale_factor", n)}
+                onChange={(n) => set("scale_factor", n, true)}
               />
             </PanelSectionRow>
           )}
@@ -573,7 +626,7 @@ function Scaling({ profile, onChange }: { profile: Profile; onChange: (p: Profil
               step={5}
               showValue={true}
               valueSuffix=" %"
-              onChange={(n) => set("sharpness", n)}
+              onChange={(n) => set("sharpness", n, true)}
             />
           </PanelSectionRow>
         </>
@@ -600,12 +653,22 @@ function Content() {
   // the two sections save independently: each sends only its own keys on top of the latest profile
   const gameRef = useRef<GameState | null>(null);
   gameRef.current = game;
+  // the newest profile, including saves still on their way (two sections can save at once)
+  const sentProfile = useRef<Profile | null>(null);
+  const saveSeq = useRef(0);
   const saveKeys = (keys: (keyof Profile)[]) => async (p: Profile) => {
     const cur = gameRef.current;
     if (!app || !cur) return;
-    const merged = { ...cur.profile } as Record<string, unknown>;
+    const merged = { ...(sentProfile.current ?? cur.profile) } as Record<string, unknown>;
     for (const k of keys) merged[k] = p[k];
-    setGame(await setGameProfile(app.appid, merged as unknown as Profile));
+    sentProfile.current = merged as unknown as Profile;
+    const seq = ++saveSeq.current;
+    try {
+      const g = await setGameProfile(app.appid, merged as unknown as Profile);
+      if (seq === saveSeq.current) setGame(g); // else a newer save is on its way: its answer counts
+    } finally {
+      if (seq === saveSeq.current) sentProfile.current = null;
+    }
   };
   const FG_KEYS: (keyof Profile)[] = ["fg", "mode", "multiplier", "target", "flow_scale", "performance", "limit"];
   const SCALING_KEYS: (keyof Profile)[] = ["scaling", "scale_mode", "scale_factor", "sharpness"];

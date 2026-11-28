@@ -623,15 +623,23 @@ def live_status(appid: str, changed: float = 0) -> dict:
     spatial = rec.get("spatial_scaling") if isinstance(rec.get("spatial_scaling"), dict) else {}
     if spatial.get("active"):
         out["scaling"] = {
+            "active": True,
             "method": spatial.get("active_method"),
             "requested": spatial.get("requested_method"),
             "source": [spatial.get("source_width"), spatial.get("source_height")],
             "output": [spatial.get("presentation_width"), spatial.get("presentation_height")],
             "fallback": spatial.get("fallback_reason"),
         }
+    elif profile.get("scaling_enabled"):
+        # started with scaling, but MAKO keeps the game at its own size: say why
+        out["scaling"] = {
+            "active": False,
+            "pending": age < 30 and not spatial.get("inactive_reason"),
+            "reason": spatial.get("inactive_reason") or spatial.get("fallback_reason"),
+        }
     if profile.get("frame_generation_provisioned") is False:
         # Frame Generation: Off for this session, scaling only
-        return {**out, "state": "scaling_only" if out.get("scaling") else "live_off"}
+        return {**out, "state": "scaling_only" if (out.get("scaling") or {}).get("active") else "live_off"}
     unavailable = rec.get("frame_generation_unavailable")
     if unavailable:
         reason = unavailable.get("reason") if isinstance(unavailable, dict) else str(unavailable)
@@ -641,7 +649,7 @@ def live_status(appid: str, changed: float = 0) -> dict:
     if rec.get("phase") == "failed":
         return {**out, "state": "failed", "problem": rec.get("reason")}
     if not requested.get("frame_generation_enabled", profile.get("frame_generation_enabled", True)):
-        return {**out, "state": "scaling_only" if out.get("scaling") else "live_off"}
+        return {**out, "state": "scaling_only" if (out.get("scaling") or {}).get("active") else "live_off"}
     if rec.get("frame_generation_active"):
         log = _read_log(appid)
         real = log.get("real_fps")
